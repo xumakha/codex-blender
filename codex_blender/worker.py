@@ -3,16 +3,19 @@ import os
 import subprocess
 import sys
 import traceback
+from pathlib import Path
 import imageio_ffmpeg
 import psutil
 
 from .config import ROOT, ASSETS, blender_command, asset_path
 from .jobs import job_path, write_json
+from .audio import encode_video
 
 
 def main():
     path = job_path(sys.argv[1])
     data = json.loads((path / "status.json").read_text(encoding="utf-8"))
+    root = Path(data.get("assets_directory", str(ASSETS)))
     data.update(pid=os.getpid(), process_created=psutil.Process().create_time())
 
     def update(**values):
@@ -21,7 +24,7 @@ def main():
 
     try:
         update(state="rendering")
-        command = blender_command() + [str(ROOT / "codex_blender" / "render_scene.py"), "--", str(path / "scene.json"), str(ASSETS), data["mode"]]
+        command = blender_command() + [str(ROOT / "codex_blender" / "render_scene.py"), "--", str(path / "scene.json"), str(root), data["mode"]]
         env = os.environ.copy()
         # Keep Blender's user configuration and extension cache local to this job.
         for key, directory in (("BLENDER_USER_RESOURCES", "blender-user"), ("BLENDER_USER_CONFIG", "blender-user/config"), ("BLENDER_USER_EXTENSIONS", "blender-user/extensions")):
@@ -34,11 +37,7 @@ def main():
         if data["mode"] == "video":
             update(state="encoding")
             spec = json.loads((path / "scene.json").read_text(encoding="utf-8"))
-            command = [imageio_ffmpeg.get_ffmpeg_exe(), "-y", "-framerate", str(spec["fps"]), "-start_number", "1", "-i", str(path / "frames" / "frame_%04d.png")]
-            if spec["audio"]:
-                command += ["-i", str(asset_path(spec["audio"])), "-map", "0:v:0", "-map", "1:a:0", "-af", "apad", "-c:a", "aac"]
-            command += ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-t", str(max(1, round(spec["duration"] * spec["fps"])) / spec["fps"]), str(path / "video.mp4")]
-            subprocess.run(command, check=True, timeout=1800)
+            encode_video(path, spec, root)
             if not (path / "video.mp4").is_file() or (path / "video.mp4").stat().st_size == 0:
                 raise RuntimeError("Video encoding produced no output")
         update(state="completed")

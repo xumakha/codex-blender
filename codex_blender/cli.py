@@ -11,6 +11,8 @@ def main():
     subs.add_parser("serve", help="Run the MCP stdio server")
     subs.add_parser("doctor", help="Check Blender and paths")
     subs.add_parser("schema", help="Print the scene JSON schema")
+    web = subs.add_parser("studio", help="Open the local video creation web interface")
+    web.add_argument("--port", type=int, default=8765)
     render = subs.add_parser("render", help="Render a scene JSON file")
     render.add_argument("scene")
     render.add_argument("--mode", choices=["preview", "video"], default="preview")
@@ -18,6 +20,10 @@ def main():
     status_parser.add_argument("job_id")
     args = parser.parse_args()
     try:
+        if args.command == "studio":
+            from .webapp import main as studio
+            studio(args.port)
+            return
         if args.command == "serve":
             from .server import main as serve
             serve()

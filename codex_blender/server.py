@@ -4,6 +4,7 @@ from mcp.server.fastmcp import FastMCP, Image
 from .config import ASSETS, OUTPUTS, blender_command, assets_dir
 from .models import SceneSpec
 from .jobs import submit, status, job_path
+from .library import catalog
 
 INSTRUCTIONS = """You direct Blender videos from the user's prompt and supplied content.
 First call blender_info and list_assets. Convert the user's intent to a SceneSpec using
@@ -39,12 +40,7 @@ def blender_info() -> dict:
 @mcp.tool()
 def list_assets() -> list[dict]:
     """List user supplied image, GLB model, audio and font files in assets/."""
-    root = assets_dir()
-    root.mkdir(parents=True, exist_ok=True)
-    allowed = {".png", ".jpg", ".jpeg", ".glb", ".wav", ".mp3", ".ogg", ".m4a", ".ttf", ".otf"}
-    return [{"path": p.relative_to(root).as_posix(), "bytes": p.stat().st_size}
-            for p in sorted(root.rglob("*")) if p.is_file() and p.suffix.lower() in allowed
-            and p.resolve().is_relative_to(root.resolve())]
+    return catalog()
 
 
 @mcp.tool()
