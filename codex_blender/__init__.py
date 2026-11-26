@@ -1,0 +1,1 @@
+"""Codex to Blender bridge."""
