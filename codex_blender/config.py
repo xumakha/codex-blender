@@ -47,7 +47,8 @@ def blender_command() -> list[str]:
 
 def validate_assets(spec, root: Path | None = None):
     extensions = {"model": {".glb", ".gltf", ".obj"}, "image": {".png", ".jpg", ".jpeg"}}
-    for obj in spec.objects:
+    objects = list(spec.objects) + [obj for shot in spec.shots for obj in shot.objects]
+    for obj in objects:
         if obj.asset:
             path = asset_path(obj.asset, root)
             if obj.kind not in extensions or path.suffix.lower() not in extensions[obj.kind]:
@@ -63,3 +64,10 @@ def validate_assets(spec, root: Path | None = None):
     for name in (spec.voice_audio, spec.music):
         if name and asset_path(name, root).suffix.lower() not in {".wav", ".mp3", ".ogg", ".m4a"}:
             raise ValueError("Voice/music must be wav, mp3, ogg or m4a")
+    for shot in spec.shots:
+        for cue in shot.narration:
+            if cue.audio and asset_path(cue.audio, root).suffix.lower() not in {".wav", ".mp3", ".ogg", ".m4a"}:
+                raise ValueError("Narration must use an audio file")
+    for effect in spec.effects:
+        if effect.audio:
+            asset_path(effect.audio, root)

@@ -15,8 +15,8 @@ async function api(url, options={}) {
   return body;
 }
 const safe = fn => async (...args) => { try {await fn(...args);} catch(error) {toast(error.message,true);} };
-const numeric=['duration','fps','samples','rate','voice-volume','music-volume'];
-const fields=['title','prompt','script','style','duration','fps','samples','voice-id','voice-file','narration','rate','voice-volume','music','music-volume','duck-music','subtitles','font'];
+const numeric=['fps','samples','rate','voice-volume','music-volume'];
+const fields=['title','prompt','style','fps','samples','voice-id','voice-file','narration','rate','voice-volume','music','music-volume','duck-music','subtitles','font'];
 function key(id){return id.replaceAll('-','_');}
 function markDirty(){ S.dirty=true; $('save-state').textContent='Chưa lưu'; }
 function dimensions(){
@@ -28,6 +28,7 @@ function dimensions(){
 function readForm(){
   const draft=structuredClone(S.project.draft);
   for(const id of fields){ const el=$(id); draft[key(id)]=el.type==='checkbox'?el.checked:numeric.includes(id)?Number(el.value):el.value; }
+  draft.script="";
   draft.voice_mode=S.voiceMode;
   for(const name of ['voice_file','music','font']) if(!draft[name]) draft[name]=null;
   [draft.width,draft.height]=dimensions();
@@ -44,6 +45,7 @@ function setForm(project){
     if(![...$(id).options].some(o=>o.value===String(d[id]))){const o=new Option(`${d[id]} ${id==='fps'?'FPS':'samples'} · tùy chỉnh`,String(d[id]));$(id).add(o);}
   }
   for(const id of fields){const el=$(id); if(el.type==='checkbox')el.checked=d[key(id)];else el.value=d[key(id)]??'';}
+  $('prompt').value=[d.prompt,d.script].filter(v=>v?.trim()).join('\n\n');
   S.voiceMode=d.voice_mode;
   const ratio=d.width/d.height;
   $('aspect').value=ratio>.9&&ratio<1.1?'1:1':ratio>1?'16:9':'9:16';
@@ -71,7 +73,7 @@ async function newProject(template){
   S.projects=await api('/api/projects');setForm(project);showPage('studio');showTab('script');
   toast(template?'Đã nạp cảnh mẫu. Bạn có thể render ngay.':'Đã tạo dự án mới');
 }
-function busy(){ const p=S.project;return p&&(['planning','preparing_audio','exporting'].includes(p.state)||['queued','rendering','encoding'].includes(p.job?.state)); }
+function busy(){ const p=S.project;return p&&(['planning','preparing_audio','exporting'].includes(p.state)||['queued','rendering','encoding','pausing','paused'].includes(p.job?.state)); }
 function renderRecent(){ $('recent-projects').innerHTML=S.projects.slice(0,8).map(p=>`<button data-project="${p.id}" class="${p.id===S.project?.id?'active':''}" title="${esc(p.title)}">${esc(p.title)}</button>`).join('')||'<p class="helper" style="padding:0 14px">Chưa có dự án</p>'; }
 function showTab(tab){ S.tab=tab;for(const node of document.querySelectorAll('[data-tab]')){const on=node.dataset.tab===tab;node.classList.toggle('active',on);node.setAttribute('aria-selected',on);}for(const t of ['script','art','audio','output'])$(`tab-${t}`).hidden=t!==tab; }
 function showPage(page){
@@ -81,10 +83,15 @@ function showPage(page){
   if(page==='library')safe(loadLibrary)(); if(page==='history')safe(loadHistory)();
 }
 function updateMetrics(){
-  const [w,h]=dimensions(), duration=Number($('duration').value)||5, fps=Number($('fps').value);
-  $('preview-format').textContent=`${w} × ${h}`;$('preview-aspect').textContent=$('aspect').value;$('preview-duration').textContent=`${duration} giây · ${fps} FPS`;
-  $('render-estimate').textContent=`${Math.round(duration*fps).toLocaleString('vi-VN')} khung hình · ${w} × ${h}. Bản thử 5 giây giúp kiểm tra bố cục trước khi render dài. Thời gian thực tế phụ thuộc cảnh và máy.`;
-  $('script-count').textContent=`${$('script').value.length.toLocaleString('vi-VN')} ký tự`;
+  const [w,h]=dimensions(), p=S.project, timing=p?.prompt_timing;
+  const current=!S.dirty&&p?.scene_current!==false;
+  const duration=S.dirty?null:current?p?.draft.scene?.duration:p?.screenplay?.duration??timing?.duration;
+  const range=!S.dirty&&timing?.duration_range;
+  const label=duration?`${duration} giây${range?` · yêu cầu ${range[0]}–${range[1]} giây`:''}`:range?`${range[0]}–${range[1]} giây theo prompt`:'Tự động theo prompt';
+  const fps=Number($('fps').value);
+  $('preview-format').textContent=`${w} × ${h}`;$('preview-aspect').textContent=$('aspect').value;$('preview-duration').textContent=`${label} · ${fps} FPS`;
+  $('render-estimate').textContent=`${duration?`${Math.round(duration*fps).toLocaleString('vi-VN')} khung hình · `:''}${w} × ${h}. Phân cảnh, thời lượng và lời thoại được lấy từ prompt. Thời gian render phụ thuộc cảnh và máy.`;
+  $('prompt-count').textContent=`${$('prompt').value.length.toLocaleString('vi-VN')} ký tự`;
   $('voice-volume-value').textContent=`${Math.round(Number($('voice-volume').value)*100)}%`;
   $('music-volume-value').textContent=`${Math.round(Number($('music-volume').value)*100)}%`;
 }
@@ -96,6 +103,11 @@ function populateAssetSelects(){
 }
 function updateAudio(){
   $('voice-upload').hidden=S.voiceMode!=='upload';$('voice-tts').hidden=S.voiceMode!=='tts';
+  $('voice-options').hidden=!['auto','tts'].includes(S.voiceMode);
+  const voice=S.voices.find(v=>v.id===$('voice-id').value);
+  $('voice-provider-note').textContent=voice?.provider==='elevenlabs'
+    ?'ElevenLabs gửi lời đọc tới API ElevenLabs và sử dụng hạn mức tài khoản. Cần đặt ELEVENLABS_API_KEY trên máy rồi khởi động lại server Studio.'
+    :'Giọng Microsoft Edge cần Internet và gửi lời đọc tới dịch vụ Microsoft Edge.';
   document.querySelectorAll('[data-voice]').forEach(n=>n.classList.toggle('active',n.dataset.voice===S.voiceMode));
   for(const [selector,player] of [['voice-file','uploaded-voice-player'],['music','music-player']]){const path=$(selector).value;$(player).hidden=!path;if(path&&$(player).dataset.path!==path){$(player).src=assetURL(path);$(player).dataset.path=path;}}
 }
@@ -114,27 +126,46 @@ function updateProjectStatus(){
   for(const el of document.querySelectorAll('.editor input,.editor textarea,.editor select')) el.disabled=!!isBusy;
   for(const id of ['save-project','generate','import-script','upload-voice','upload-music','upload-font','add-reference'])$(id).disabled=!!isBusy;
   $('render-preview').disabled=isBusy||!p.draft.scene;$('render-video').disabled=isBusy||!p.draft.scene;
-  $('generate').querySelector('span').textContent=p.state==='planning'?'Codex đang tạo cảnh…':p.draft.scene?'Cập nhật cảnh với Codex':'Tạo cảnh với Codex';
-  $('scene-label').textContent=p.draft.scene?`${p.draft.scene.objects.length} đối tượng · Cảnh đã sẵn sàng`:'Bắt đầu với ý tưởng của bạn';
+  $('generate').querySelector('span').textContent=p.state==='planning'?'Đang đọc prompt…':p.draft.scene?'Tạo lại video':'Tạo video';
+  const activeScene=p.scene_current!==false?p.draft.scene:null;
+  const screenplay=activeScene||p.screenplay;
+  const shots=screenplay?.shots||[];
+  $('scene-label').textContent=shots.length?`${shots.length} phân cảnh · ${screenplay.duration} giây · Theo prompt`:activeScene?`${activeScene.objects.length} đối tượng · Cảnh đã sẵn sàng`:p.prompt_timing?.duration?`Thời lượng theo prompt: ${p.prompt_timing.duration} giây`:'Bắt đầu với ý tưởng của bạn';
+  const storyboard=shots.map((shot,i)=>`<details><summary>${i+1}. ${esc(shot.title)} · ${shot.start}–${shot.end}s</summary><p>${esc(shot.setting)}</p>${shot.elements?.length?`<strong>Chi tiết cần có trong cảnh</strong><ul>${shot.elements.map(element=>`<li><strong>${esc(element.label)}</strong> · ${esc(element.appearance)}${element.parts?.length?`<p class="helper">${element.parts.map(part=>`${part.count} ${esc(part.name)}`).join(' · ')}</p>`:''}</li>`).join('')}</ul>`:''}<ul>${shot.actions.map(action=>`<li>${esc(action)}</li>`).join('')}</ul>${shot.narration.map(cue=>`<p><strong>${cue.start}–${cue.end}s:</strong> ${esc(cue.text)}</p>`).join('')}</details>`).join('');
+  $('storyboard').hidden=!shots.length;
+  if($('storyboard').dataset.content!==storyboard){$('storyboard').innerHTML=`<h2>Phân cảnh theo prompt</h2>${storyboard}`;$('storyboard').dataset.content=storyboard;}
   const job=p.job;
+  $('retry-actions').hidden=isBusy||job?.state!=='failed';
+  $('retry-render').disabled=!!isBusy;
+  if(job)$('render-log').href=jobURL(job.id,'render.log');
   const working=['planning','preparing_audio','exporting'].includes(p.state)?p.state:job?.state;
   const labels={planning:'Codex đang lên cảnh',preparing_audio:'Đang tạo giọng đọc',exporting:'Đang lưu asset Blender',queued:'Đang chờ render',rendering:'Blender đang render',encoding:'Đang ghép âm thanh & xuất MP4',completed:job?.mode==='video'?'Video đã hoàn tất':'Preview đã sẵn sàng',failed:'Render chưa hoàn tất'};
   $('status-card').hidden=!working||working==='idle'||working==='ready'||working==='error';
+  Object.assign(labels,{pausing:'Đang chờ tạm dừng',paused:'Đã tạm dừng render'});
   $('status-title').textContent=labels[working]||'';
   $('status-card').classList.toggle('done',working==='completed');
-  const determinate=working==='rendering'&&job?.mode==='video';
+  $('status-card').classList.toggle('paused',['pausing','paused','failed'].includes(working));
+  const determinate=['rendering','pausing','paused','encoding','failed','completed'].includes(working)&&job?.mode==='video';
+  const percent=working==='completed'?100:Math.min(100,Math.max(0,Math.floor((job?.frames_rendered||0)/Math.max(1,job?.frames_total||1)*100)));
   $('progress-track').classList.toggle('indeterminate',!determinate&&working!=='completed'&&working!=='failed');
-  $('progress-bar').style.width=working==='completed'?'100%':`${determinate?Math.min(100,job.frames_rendered/job.frames_total*100):0}%`;
-  $('progress-count').textContent=determinate?`${job.frames_rendered} / ${job.frames_total}`:'';
+  if(['pausing','paused'].includes(working))$('progress-track').classList.remove('indeterminate');
+  $('progress-bar').style.width=`${determinate||working==='completed'?percent:0}%`;
+  if(determinate||working==='completed')$('progress-track').setAttribute('aria-valuenow',percent);
+  else $('progress-track').removeAttribute('aria-valuenow');
+  $('progress-count').textContent=determinate?`${percent}% · ${job.frames_rendered} / ${job.frames_total} khung hình`:working==='completed'?'100%':'';
+  $('pause-render').hidden=!['queued','rendering','pausing','paused'].includes(working);
+  $('pause-render').disabled=!!S.controlPending;
+  $('pause-render').textContent=['pausing','paused'].includes(working)?'Tiếp tục':'Tạm dừng';
   const descriptions={planning:'Đang đọc kịch bản, ảnh tham khảo và chọn tài nguyên phù hợp.',preparing_audio:'Dịch vụ giọng đọc online đang xử lý phần thuyết minh.',exporting:'Tạo GLB và ảnh thumbnail trong thư viện cố định.',rendering:'Bạn có thể chuyển sang thư viện; render tiếp tục chạy trên máy.',queued:'Tác vụ chạy nền. Tiến độ sẽ tự cập nhật.',encoding:'Ghép voice, nhạc nền và phụ đề theo cấu hình đã chọn.',completed:'Kết quả được lưu trên máy và có thể tải về bên dưới.'};
-  $('status-detail').textContent=descriptions[working]||'';
+  Object.assign(descriptions,{pausing:'Blender sẽ tạm dừng sau khi hoàn tất khung hình đang xử lý.',paused:'Các khung hình đã render được giữ lại. Bấm Tiếp tục để dựng tiếp.'});
+  $('status-detail').textContent=(p.state==='planning'?p.planning_detail:null)||descriptions[working]||'';
   const error=p.error||job?.error;$('project-error').hidden=!error;$('project-error').textContent=error||'';
-  const hasVideo=job?.state==='completed'&&job?.artifacts?.['video.mp4'];
-  const hasPreview=job?.artifacts?.['preview.png'];
+  const hasVideo=p.scene_current!==false&&job?.state==='completed'&&job?.artifacts?.['video.mp4'];
+  const hasPreview=p.scene_current!==false&&job?.artifacts?.['preview.png'];
   $('preview-video').hidden=!hasVideo;$('preview-image').hidden=!!hasVideo||!hasPreview;$('preview-empty').hidden=!!hasVideo||!!hasPreview;
   if(hasVideo)mediaSource($('preview-video'),jobURL(job.id,'video.mp4'));
   else if(hasPreview)mediaSource($('preview-image'),jobURL(job.id,'preview.png'));
-  $('result-actions').hidden=job?.state!=='completed';$('download-video').hidden=!hasVideo;
+  $('result-actions').hidden=job?.state!=='completed'||p.scene_current===false;$('download-video').hidden=!hasVideo;
   if(job){$('download-video').href=jobURL(job.id,'video.mp4')+'?download=1';$('download-video').download='video.mp4';$('download-blend').href=jobURL(job.id,'scene.blend')+'?download=1';}
   $('export-asset').disabled=isBusy;renderReferences();
 }
@@ -145,8 +176,8 @@ async function poll(){
     const fresh=await api(`/api/projects/${id}`);
     if(S.project?.id!==id)return;
     if((wasState==='planning'&&fresh.state!=='planning')||wasState==='exporting'&&fresh.state!=='exporting'){
-      setForm(fresh);await loadLibrary();if(fresh.state==='ready')toast(wasState==='exporting'?'Asset đã được lưu vào thư viện':'Cảnh đã sẵn sàng. Hãy tạo preview.');
-    }else{S.project={...fresh,draft:S.dirty?S.project.draft:fresh.draft};updateProjectStatus();}
+      setForm(fresh);await loadLibrary();if(fresh.state==='ready')toast(wasState==='exporting'?'Asset đã được lưu vào thư viện':fresh.job?.mode==='video'?'Đã dựng cảnh, đang tạo video.':'Cảnh đã sẵn sàng.');
+    }else{S.project={...fresh,draft:S.dirty?S.project.draft:fresh.draft};updateMetrics();updateProjectStatus();}
     if(fresh.job?.state==='completed'&&wasJob!=='completed')toast(fresh.job.mode==='video'?'Video đã xuất xong':'Ảnh preview đã sẵn sàng');
   }catch(error){console.warn('Không cập nhật được tiến độ',error.message);}
 }
@@ -189,14 +220,15 @@ async function loadHistory(){
 async function openExport(){
   const job=S.project.job;if(!job||job.state!=='completed')return;
   const scene=await fetch(jobURL(job.id,'scene.json')).then(r=>r.json());
-  $('export-objects').innerHTML=scene.objects.map(o=>`<label><input type="checkbox" value="${esc(o.name)}">${esc(o.name)} <span class="muted">· ${esc(o.kind)}</span></label>`).join('');
+  const objects=scene.shots?.length?scene.shots.flatMap((shot,i)=>shot.objects.map(o=>({...o,name:`S${String(i+1).padStart(2,'0')}_${o.name}`,kind:shot.title}))):scene.objects;
+  $('export-objects').innerHTML=objects.map(o=>`<label><input type="checkbox" value="${esc(o.name)}">${esc(o.name)} <span class="muted">· ${esc(o.kind)}</span></label>`).join('');
   $('asset-name').value='';$('asset-description').value='';$('asset-tags').value='';$('export-dialog').showModal();
 }
 async function boot(){
   const data=await api('/api/bootstrap');Object.assign(S,{assets:data.assets,projects:data.projects,settings:data.settings,voices:data.voices});
   $('connection-dot').classList.toggle('ready',data.blender_ready);$('connection-label').textContent=data.blender_ready?'Blender sẵn sàng':'Blender chưa sẵn sàng';
   $('health-cards').innerHTML=`<div class="health-card">Blender<small>${data.blender_ready?'Sẵn sàng render':esc(data.blender_error)}</small></div><div class="health-card">Codex CLI<small>${data.codex_available?'Đã tìm thấy CLI trên máy':'Chưa tìm thấy — hãy cài Codex CLI'}</small></div>`;
-  $('voice-id').innerHTML=data.voices.map(v=>`<option value="${v.id}">${esc(v.name)} · ${esc(v.language)} · ${v.gender}</option>`).join('');
+  $('voice-id').innerHTML=data.voices.map(v=>`<option value="${esc(v.id)}">${[v.name,v.language,v.gender].filter(Boolean).map(esc).join(' · ')}</option>`).join('');
   await loadLibrary();
   const stored=localStorage.getItem('frame-project'), found=data.projects.find(p=>p.id===stored)||data.projects[0];
   if(found)setForm(await api(`/api/projects/${found.id}`));else setForm(await api('/api/projects',{method:'POST',body:{}}));
@@ -204,12 +236,25 @@ async function boot(){
   const page=location.hash.slice(1);if(['studio','library','history','settings'].includes(page))showPage(page);
   S.poll=setInterval(poll,2500);
 }
-for(const id of fields){$(id).addEventListener('input',()=>{markDirty();updateMetrics();if(['music','voice-file'].includes(id))updateAudio();});}
+for(const id of fields){$(id).addEventListener('input',()=>{markDirty();updateMetrics();if(['music','voice-file','voice-id'].includes(id))updateAudio();});}
 $('scene-json').addEventListener('input',markDirty);
 for(const id of ['aspect','resolution'])$(id).addEventListener('change',()=>{if(id==='aspect'&&$('resolution').value==='custom')$('resolution').value='draft';markDirty();updateMetrics();});
 $('new-project').onclick=safe(()=>newProject());
 $('save-project').onclick=safe(async()=>{await saveDraft();toast('Dự án đã được lưu');});
-$('generate').onclick=safe(async()=>{await saveDraft();S.project=await api(`/api/projects/${S.project.id}/plan`,{method:'POST',body:{}});updateProjectStatus();});
+$('generate').onclick=safe(async()=>{await saveDraft();setForm(await api(`/api/projects/${S.project.id}/plan`,{method:'POST',body:{auto_render:true}}));});
+$('pause-render').onclick=safe(async()=>{
+  if(S.controlPending)return;
+  const id=S.project.id, action=['pausing','paused'].includes(S.project.job?.state)?'resume':'pause';
+  S.controlPending=true;updateProjectStatus();
+  try{
+    const project=await api(`/api/projects/${id}/control/${action}`,{method:'POST',body:{}});
+    if(S.project?.id===id)S.project=project;
+  }finally{S.controlPending=false;updateProjectStatus();}
+});
+$('retry-render').onclick=safe(async()=>{
+  S.project=await api(`/api/projects/${S.project.id}/retry`,{method:'POST',body:{}});
+  updateProjectStatus();toast('Đang tiếp tục render các khung hình còn thiếu.');
+});
 for(const [id,mode] of [['render-preview','preview'],['render-video','video']])$(id).onclick=safe(async()=>{await saveDraft();S.project=await api(`/api/projects/${S.project.id}/render`,{method:'POST',body:{mode}});updateProjectStatus();});
 $('upload-references').onclick=()=>chooseFile('references',async path=>{await addReference(path);renderReferences();},true);
 $('add-reference').onclick=safe(()=>{if(!$('existing-reference').value)throw new Error('Chọn một ảnh trong thư viện');return addReference($('existing-reference').value);});
@@ -220,7 +265,7 @@ $('file-input').onchange=safe(async()=>{
   finally{$('file-input').value='';}
 });
 $('import-script').onclick=()=>$('script-file-input').click();
-$('script-file-input').onchange=safe(async()=>{const file=$('script-file-input').files[0];if(!file)return;if(file.size>200000)throw new Error('Kịch bản tối đa 200 KB');$('script').value=await file.text();markDirty();updateMetrics();$('script-file-input').value='';});
+$('script-file-input').onchange=safe(async()=>{const file=$('script-file-input').files[0];if(!file)return;if(file.size>200000)throw new Error('Kịch bản tối đa 200 KB');$('prompt').value=await file.text();markDirty();updateMetrics();$('script-file-input').value='';});
 $('preview-voice').onclick=safe(async()=>{
   const button=$('preview-voice');button.disabled=true;
   try{toast('Đang tạo đoạn nghe thử…');const result=await api('/api/voice-preview',{method:'POST',body:{voice:$('voice-id').value,rate:Number($('rate').value),text:$('narration').value||'Xin chào! Đây là giọng đọc cho video của bạn.'}});$('tts-player').src=assetURL(result.path);$('tts-player').hidden=false;await $('tts-player').play();}finally{button.disabled=false;}

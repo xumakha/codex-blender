@@ -1,12 +1,13 @@
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
 from starlette.testclient import TestClient
 
-from codex_blender import config, studio, library, jobs
-from codex_blender.models import SceneSpec
+from codex_blender import config, studio, library, jobs, audio
+from codex_blender.models import SceneSpec, VideoPlan, ShotDesign
 from codex_blender.webapp import app
 
 HEADERS={"X-Studio-Request":"1"}
@@ -61,23 +62,67 @@ class StudioTests(unittest.TestCase):
 
     def test_style_references_reach_codex_and_scene_is_persisted(self):
         image=self.assets/'reference.png';image.write_bytes(b'image')
-        p=studio.create_project(studio.Draft(prompt='Hộp xanh',references=['reference.png']))
+        p=studio.create_project(studio.Draft(prompt='Hộp xanh',references=['reference.png'],voice_id=audio.ELEVENLABS_VOICE_ID))
         captured={}
         def fake_run(cmd,**kwargs):
             captured['cmd']=cmd;captured['task']=kwargs['input']
             output=Path(cmd[cmd.index('-o')+1])
-            output.write_text(SceneSpec(objects=[{'name':'box','kind':'cube'}]).model_dump_json(),encoding='utf-8')
+            if output.name.startswith('screenplay-'):
+                value=VideoPlan(title='Box',duration=12,style='Studio',shots=[{'title':'Rotate','start':0,'end':12,'setting':'Studio','actions':['Rotate the box'],'elements':[{'id':'box','label':'Box','source':'Hộp xanh','role':'prop','appearance':'Blue box'}]}])
+            else:
+                value=ShotDesign(objects=[{'name':'box','kind':'cube','keyframes':[{'time':12,'rotation':[0,0,90]}]}],bindings=[{'action_index':0,'objects':['box'],'elements':['box'],'start':0,'end':12}],element_bindings=[{'element_id':'box','objects':['box']}])
+            output.write_text(value.model_dump_json(),encoding='utf-8')
             class Result:returncode=0
             return Result()
         # Use an actual-shaped npm path so Windows command construction remains exercised.
         exe=str(Path('C:/Users/thanh/AppData/Roaming/npm/codex.cmd'))
-        with patch.object(studio.shutil,'which',side_effect=lambda n:exe if 'codex' in n else 'node'),patch.object(studio.subprocess,'run',side_effect=fake_run):
-            studio.plan_scene(p['id'],studio.Draft.model_validate(p['draft']),self.assets)
+        with patch.object(studio.shutil,'which',side_effect=lambda n:exe if 'codex' in n else 'node'),patch.object(studio.subprocess,'run',side_effect=fake_run),patch.object(studio,'render_project') as render:
+            studio.plan_scene(p['id'],studio.Draft.model_validate(p['draft']),self.assets,auto_render=True)
+            render.assert_called_once_with(p['id'],'video')
         saved=studio.read_project(p['id'])
         self.assertEqual(saved['state'],'ready',saved.get('error'))
         self.assertIn(str(image),captured['cmd'])
         self.assertIn('art-direction references',captured['task'])
-        self.assertEqual(saved['draft']['scene']['objects'][0]['name'],'box')
+        self.assertEqual(saved['draft']['scene']['shots'][0]['objects'][0]['name'],'box')
+        self.assertEqual(saved['draft']['duration'],12)
+        task=json.loads(captured['task'].split('INPUT:\n',1)[1])
+        self.assertEqual(task['preferred_voice_id'],audio.ELEVENLABS_VOICE_ID)
+        self.assertIn(audio.ELEVENLABS_VOICE_ID,{voice['id'] for voice in task['voices']})
+        self.assertNotIn('duration',task)
+        self.assertNotIn('script',task)
+        rendered=studio.scene_for_render(studio.Draft.model_validate(saved['draft']))
+        self.assertEqual(rendered.duration,12)
+        self.assertEqual(rendered.shots[0].objects[0].keyframes[0].time,12)
+
+    def test_legacy_script_merges_without_losing_content(self):
+        draft=studio.Draft(prompt='Idea',script='Full script')
+        self.assertEqual(draft.prompt,'Idea\n\nFull script')
+        self.assertEqual(draft.script,'')
+        self.assertEqual(studio.Draft.model_validate(draft.model_dump()).prompt,draft.prompt)
+        long_draft=studio.Draft(prompt='a'*20000,script='b'*50000)
+        SceneSpec(prompt=long_draft.prompt,objects=[{'name':'box','kind':'cube'}])
+
+    def test_plan_endpoint_requests_automatic_video_render(self):
+        p=studio.create_project(studio.Draft(prompt='A moving box'))
+        with patch.object(studio.POOL,'submit') as submit:
+            response=self.client.post('/api/projects/'+p['id']+'/plan',json={'auto_render':True})
+        self.assertEqual(response.status_code,200,response.text)
+        self.assertEqual(response.json()['state'],'planning')
+        self.assertTrue(submit.call_args.args[-2])
+
+    def test_elevenlabs_voice_is_listed_saved_and_available_for_preview(self):
+        voices=self.client.get('/api/bootstrap').json()['voices']
+        selected=next(voice for voice in voices if voice['id']==audio.ELEVENLABS_VOICE_ID)
+        self.assertEqual(selected['provider'],'elevenlabs')
+        p=studio.create_project()
+        draft=p['draft'];draft['voice_id']=audio.ELEVENLABS_VOICE_ID
+        saved=self.client.put('/api/projects/'+p['id'],json=draft)
+        self.assertEqual(saved.status_code,200,saved.text)
+        self.assertEqual(self.client.get('/api/projects/'+p['id']).json()['draft']['voice_id'],audio.ELEVENLABS_VOICE_ID)
+        with patch.dict(os.environ,{'ELEVENLABS_API_KEY':''}):
+            response=self.client.post('/api/voice-preview',json={'voice':audio.ELEVENLABS_VOICE_ID,'text':'Xin chào!'})
+        self.assertEqual(response.status_code,400)
+        self.assertIn('ELEVENLABS_API_KEY',response.json()['error'])
 
     def test_retime_and_audio_configuration(self):
         scene=SceneSpec(duration=5,objects=[{'name':'box','kind':'cube','keyframes':[{'time':5,'rotation':[0,0,90]}]}])
@@ -88,11 +133,42 @@ class StudioTests(unittest.TestCase):
         self.assertEqual(result.music,'music.wav')
         self.assertEqual(result.music_volume,.15)
 
+    def test_retry_endpoint_uses_saved_job_without_replanning(self):
+        p=studio.create_project(studio.Draft(prompt='Keep this prompt'))
+        studio.save_project(p['id'],current_job='a'*32,jobs=['a'*32])
+        failed={'id':'a'*32,'state':'failed','mode':'video'}
+        with patch.object(studio,'status',return_value=failed),patch.object(studio,'retry') as retry:
+            response=self.client.post('/api/projects/'+p['id']+'/retry',json={})
+        self.assertEqual(response.status_code,200,response.text)
+        retry.assert_called_once_with('a'*32)
+        self.assertEqual(response.json()['draft']['prompt'],'Keep this prompt')
+
     def test_structured_output_preserves_title_property(self):
         schema=studio.strict_schema(SceneSpec.model_json_schema())
         self.assertIn('title',schema['properties'])
         self.assertIn('title',schema['required'])
         self.assertNotIn('prefixItems',schema['$defs']['Camera']['properties']['location'])
+
+    def test_pause_resume_api_and_paused_project_remains_busy(self):
+        p=studio.create_project()
+        jid='d'*32
+        path=self.root/'jobs'/jid
+        path.mkdir(parents=True)
+        jobs.write_json(path/'status.json',{'id':jid,'state':'rendering','mode':'video','frames_total':120})
+        studio.save_project(p['id'],current_job=jid,jobs=[jid],state='ready')
+        with patch.object(jobs,'OUTPUTS',path.parent):
+            url='/api/projects/'+p['id']
+            response=self.client.post(url+'/control/pause',json={})
+            self.assertEqual(response.status_code,200,response.text)
+            self.assertEqual(response.json()['job']['state'],'pausing')
+            (path/'.paused').touch()
+            self.assertEqual(self.client.get(url).json()['job']['state'],'paused')
+            self.assertEqual(self.client.put(url,json=p['draft']).status_code,400)
+            self.assertEqual(self.client.post(url+'/render',json={'mode':'video'}).status_code,400)
+            response=self.client.post(url+'/control/resume',json={})
+            self.assertEqual(response.status_code,200,response.text)
+            self.assertEqual(response.json()['job']['state'],'rendering')
+            self.assertEqual(self.client.post(url+'/control/unknown',json={}).status_code,400)
 
     def test_settings_do_not_retarget_existing_jobs(self):
         with patch.object(jobs,'OUTPUTS',self.root/'jobs'),patch.object(jobs,'blender_command',return_value=['blender']),patch.object(jobs.subprocess,'Popen'):

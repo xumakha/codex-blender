@@ -91,7 +91,8 @@ async def project_detail(request):
 
 
 async def plan(request):
-    return JSONResponse(studio.start_plan(request.path_params["pid"]))
+    body = await request.json()
+    return JSONResponse(studio.start_plan(request.path_params["pid"], auto_render=body.get("auto_render") is True))
 
 
 async def render(request):
@@ -108,6 +109,14 @@ async def export(request):
     return JSONResponse(studio.export_asset(request.path_params["pid"], body["job_id"], str(body.get("name","")),
                                            body["names"], str(body.get("description",""))[:3000],
                                            [str(t)[:50] for t in body.get("tags",[])][:20]))
+
+
+async def retry_render(request):
+    return JSONResponse(studio.retry_render(request.path_params["pid"]))
+
+
+async def control_render(request):
+    return JSONResponse(studio.control_render(request.path_params["pid"], request.path_params["action"]))
 
 
 async def voice_preview(request):
@@ -213,8 +222,9 @@ async def lifespan(app):
 
 
 routes=[Route("/api/bootstrap",bootstrap),Route("/api/library",list_library),Route("/api/projects",project_collection,methods=["GET","POST"]),
+    Route("/api/projects/{pid}/control/{action}",control_render,methods=["POST"]),
     Route("/api/projects/{pid}",project_detail,methods=["GET","PUT"]),Route("/api/projects/{pid}/plan",plan,methods=["POST"]),
-    Route("/api/projects/{pid}/render",render,methods=["POST"]),Route("/api/projects/{pid}/export",export,methods=["POST"]),
+    Route("/api/projects/{pid}/render",render,methods=["POST"]),Route("/api/projects/{pid}/retry",retry_render,methods=["POST"]),Route("/api/projects/{pid}/export",export,methods=["POST"]),
     Route("/api/voice-preview",voice_preview,methods=["POST"]),Route("/api/uploads",uploads,methods=["POST"]),
     Route("/api/assets/file",asset_file),Route("/api/settings",configure,methods=["POST"]),Route("/api/folder-picker",folder_picker,methods=["POST"]),
     Route("/api/jobs",history),Route("/api/jobs/{jid}",job_detail),Route("/api/jobs/{jid}/{name}",job_artifact),

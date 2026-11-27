@@ -4,11 +4,14 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import threading
 import uuid
 from datetime import datetime, timezone
 
 from .config import ROOT, ASSETS, OUTPUTS, blender_command, validate_assets, assets_dir
 from .models import SceneSpec
+
+LOCK = threading.RLock()
 
 
 def write_json(path, value):
@@ -41,8 +44,27 @@ def status(job_id):
             alive = False
         if not alive:
             data["state"] = "failed"
-            data["error"] = "Render worker was interrupted; see render.log and submit a new job."
+            data["error"] = f"Render đã bị ngắt ở {data['frames_rendered']}/{data['frames_total']} khung hình. Bấm Tiếp tục render để dựng các khung còn thiếu; xem render.log để kiểm tra chi tiết."
+    if data["state"] in {"queued", "rendering"} and (path / ".pause-requested").exists():
+        data["state"] = "paused" if (path / ".paused").exists() else "pausing"
     return data
+
+
+def control(job_id, action):
+    with LOCK:
+        current = status(job_id)
+        path = job_path(job_id)
+        if action == "pause":
+            if current["state"] not in {"queued", "rendering", "pausing", "paused"}:
+                raise ValueError("Chỉ tạm dừng khi đang chờ hoặc đang render")
+            (path / ".pause-requested").touch()
+        elif action == "resume":
+            if current["state"] not in {"pausing", "paused"}:
+                raise ValueError("Tác vụ chưa được tạm dừng")
+            (path / ".pause-requested").unlink(missing_ok=True)
+        else:
+            raise ValueError("Thao tác render không hợp lệ")
+        return status(job_id)
 
 
 def submit(spec: SceneSpec, mode="preview", asset_root=None):
@@ -58,14 +80,41 @@ def submit(spec: SceneSpec, mode="preview", asset_root=None):
     data = {"id": job_id, "state": "queued", "mode": mode, "title": spec.title, "assets_directory": str(asset_root),
             "created": datetime.now(timezone.utc).isoformat(), "frames_total": max(1, round(spec.duration * spec.fps)) if mode == "video" else 1}
     write_json(path / "status.json", data)
-    flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    launch_worker(path, data)
+    return {**data, "output_directory": str(path), "next": "Poll video_job_status with this id"}
+
+
+def launch_worker(path, data, resume=False):
+    flags = (subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP) if os.name == "nt" else 0
     try:
-        with (path / "render.log").open("w", encoding="utf-8") as log:
-            subprocess.Popen([sys.executable, "-m", "codex_blender.worker", job_id], cwd=ROOT,
+        with (path / "render.log").open("a" if resume else "w", encoding="utf-8") as log:
+            if resume:
+                log.write("\n--- Resuming interrupted render; keeping completed frames ---\n")
+                log.flush()
+            subprocess.Popen([sys.executable, "-u", "-m", "codex_blender.worker", data["id"]], cwd=ROOT,
                              stdin=subprocess.DEVNULL, stdout=log, stderr=log,
                              creationflags=flags, start_new_session=os.name != "nt")
     except Exception as exc:
         data.update(state="failed", error=str(exc))
         write_json(path / "status.json", data)
         raise
-    return {**data, "output_directory": str(path), "next": "Poll video_job_status with this id"}
+
+
+def retry(job_id):
+    with LOCK:
+        current = status(job_id)
+        if current["state"] != "failed":
+            raise ValueError("Chỉ tiếp tục job render đã thất bại hoặc bị ngắt")
+        path = job_path(job_id)
+        data = json.loads((path / "status.json").read_text(encoding="utf-8"))
+        spec = SceneSpec.model_validate_json((path / "scene.json").read_text(encoding="utf-8"))
+        validate_assets(spec, Path(data.get("assets_directory", str(ASSETS))))
+        blender_command()
+        for key in ("pid", "process_created", "error"):
+            data.pop(key, None)
+        for name in (".pause-requested", ".paused"):
+            (path / name).unlink(missing_ok=True)
+        data.update(state="queued", resumed=datetime.now(timezone.utc).isoformat())
+        write_json(path / "status.json", data)
+        launch_worker(path, data, resume=True)
+        return status(job_id)

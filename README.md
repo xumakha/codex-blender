@@ -16,13 +16,29 @@ Chạy `start-studio.cmd` (nhấp đúp trên Windows), rồi mở **http://127.
 
 Trong Studio:
 
-1. Tạo dự án, nhập ý tưởng và kịch bản; có thể nhập file `.txt` hoặc bắt đầu từ cảnh mẫu.
+1. Tạo dự án, nhập một **prompt tổng** gồm ý tưởng, kịch bản, hành động và phong cách; có thể nhập file `.txt` hoặc bắt đầu từ cảnh mẫu. Nội dung hai ô của dự án cũ được gộp vào prompt tổng.
 2. Trong **Phong cách**, thêm tối đa 4 ảnh tham khảo, chọn chỉ dẫn mỹ thuật và GLB ưu tiên. Codex nhận ảnh thật cùng yêu cầu, tham khảo màu sắc/chất liệu/tỷ lệ; đây không phải tính năng tự chuyển ảnh thành mô hình 3D hay bảo đảm sao chép chính xác phong cách.
-3. Trong **Âm thanh**, chọn không voice, tải file voice có sẵn, hoặc chọn voice online tiếng Việt/Anh. Thay đổi tốc độ giọng AI, âm lượng voice, nhạc nền và bật giảm nhạc khi có lời đọc. Nghe thử file trực tiếp trên giao diện.
-4. Trong **Xuất video**, đặt thời lượng, tỷ lệ, độ phân giải, FPS, chất lượng và phụ đề tĩnh. Phụ đề cần font phù hợp; chưa có tự căn phụ đề theo từng câu.
-5. Bấm **Tạo cảnh với Codex**, đợi AI tạo mô tả cảnh. Bấm **Tạo preview** để xem bố cục, rồi **Xuất video**. Hai bước render không gọi lại AI; các thay đổi audio/độ phân giải không buộc tạo lại cảnh.
+3. Mô tả lời thoại, giọng đọc, nhạc và hiệu ứng âm thanh trong prompt tổng. Chế độ **Theo prompt** tự lấy lời đọc và các mốc của từng cảnh, tạo giọng tiếng Việt/Anh và phụ đề theo từng đoạn. Các điều khiển voice thủ công phục vụ cảnh cũ; phân cảnh mới dùng âm thanh đã biên soạn từ prompt.
+4. Tỷ lệ, độ phân giải và FPS trong prompt được ưu tiên; nếu không ghi thì dùng giá trị ở **Xuất video**. Giữ nguyên các mốc phân cảnh/lời thoại đã ghi; suy ra thời lượng khi không có mốc (tối đa 3600 giây). Nhận cả khoảng thời lượng: **90–120 giây** cùng timeline kết thúc **01:35** sẽ tạo video **95 giây**, giữ đủ các phân cảnh. Nếu chỉ có khoảng, AI chọn thời lượng trong khoảng đó. Lời đọc không bị cắt ngầm để ép vào cảnh: nếu không thể đọc kịp, ứng dụng báo rõ đoạn cần chỉnh.
+5. Bấm **Tạo video** để biên soạn toàn bộ timeline, dựng bối cảnh và chuyển động của từng cảnh, tạo âm thanh rồi render MP4. Danh sách **Phân cảnh theo prompt** cho xem mốc thời gian, hành động và lời thoại. Mỗi hành động phải gắn với đối tượng có chuyển động; chỉ di chuyển camera không đủ. Nếu prompt hoặc đầu vào dựng đã đổi, bấm xuất/preview sẽ lập kế hoạch mới thay vì dùng lại cảnh cũ.
+6. Khi Blender đang render, thanh tiến trình hiển thị **phần trăm và số khung hình**. Bấm **Tạm dừng** để dừng sau khung hình đang xử lý; **Tiếp tục** dựng tiếp và giữ các khung đã xong. Thời gian tạm dừng không tính vào giới hạn thời gian render. Nút này có trong giai đoạn chờ/render, trước bước ghép MP4; bước lập kế hoạch và tạo âm thanh chỉ hiển thị trạng thái xử lý.
 
-Prompt và ảnh tham khảo được gửi tới Codex bằng CLI đã đăng nhập trên máy. Dịch vụ voice online dùng `edge-tts` (Microsoft Edge), cần Internet, có thể không khả dụng tùy mạng/dịch vụ; trong lần kiểm tra trên máy này dịch vụ chưa trả về âm thanh. Có thể thay voice hoàn toàn bằng file MP3/WAV/OGG/M4A riêng. Voice/nhạc tải lên được ghép trên máy. Tool không nhân bản giọng nói và không tự sáng tác nhạc nền.
+Prompt và ảnh tham khảo được gửi tới Codex bằng CLI đã đăng nhập trên máy. Dịch vụ voice online dùng `edge-tts` (Microsoft Edge) hoặc ElevenLabs theo giọng đã chọn, cần Internet. Voice/nhạc được ghép trên máy. Ứng dụng có thể tổng hợp nhạc nền đơn giản và hiệu ứng hoạt hình (chuông, bước chân, máy móc, click, quét, gió, thở, pop) theo timeline; dùng file trong thư viện khi cần bản thu cụ thể. Tool không nhân bản giọng nói.
+
+Đã thêm giọng ElevenLabs **`gb30mYs9RQJGV3jqCOM2`** vào **Âm thanh → Giọng đọc ưu tiên**, dùng được cho **Theo prompt**, **Voice AI** và **Nghe thử giọng**. Chọn giọng này để dùng cho người thuyết minh chính; yêu cầu giọng cụ thể trong prompt được ưu tiên. Tích hợp dùng [Text to Speech API](https://elevenlabs.io/docs/api-reference/text-to-speech/convert) với model `eleven_flash_v2_5` có hỗ trợ tiếng Việt ([danh sách model](https://elevenlabs.io/docs/overview/models)). Lời đọc được gửi tới ElevenLabs và sử dụng hạn mức của tài khoản; tài khoản/API key phải có quyền truy cập voice ID này.
+
+Đặt API key trong PowerShell trước khi khởi động server Studio:
+
+```powershell
+$env:ELEVENLABS_API_KEY = "YOUR_ELEVENLABS_API_KEY"
+.\start-studio.cmd
+```
+
+Nếu server Studio đang chạy, dừng server cũ trước rồi chạy lại từ cửa sổ PowerShell đã đặt biến. Key chỉ được đọc từ môi trường của server, không lưu trong dự án hoặc gửi tới Codex/trình duyệt. Các giọng Microsoft Edge vẫn dùng được khi chưa cấu hình key ElevenLabs.
+
+Luồng dựng hỗ trợ nhiều cảnh 3D, nhóm bộ phận có khớp/pivot, transform, xuất hiện/ẩn đối tượng, camera keyframes và ánh sáng riêng từng cảnh. Mô hình GLB tĩnh không tự có rig; AI phải dựng bộ phận tách rời cho động tác cần khớp. Yêu cầu vượt khả năng dựng/âm thanh được báo lỗi thay vì âm thầm bỏ cảnh. Việc kiểm tra timeline và chuyển động không bảo đảm mọi chi tiết hình ảnh được diễn giải chính xác; xem preview trước khi render chất lượng cao.
+
+Trước khi dựng, AI liệt kê các yếu tố hình ảnh từ prompt: bối cảnh, nhân vật, đạo cụ, diện mạo và số lượng bộ phận. Mỗi yếu tố/bộ phận phải gắn với hình khối Blender thật; ảnh tham khảo không được dùng thay mô hình. Công thức `repeat` lặp cả nhóm và các phần con để dựng đủ tầng, bậc thang, cửa sổ, lan can mà không phải rút gọn thành một khối lớn. Các hành động phải tác động đúng nhân vật/đạo cụ được liệt kê. Thời lượng khai báo trong kịch bản được ưu tiên hơn câu yêu cầu thử ngắn còn lưu từ trước. Bản thử ngắn chỉ áp dụng khi prompt không khai báo thời lượng đầy đủ. Kéo dài một cảnh mở đầu không thể thay thế toàn bộ các cảnh trong timeline. Giao diện hiển thị phân cảnh ngay khi biên soạn xong, trong lúc Blender đang được dựng.
 
 ### Thư viện dùng lại
 
@@ -35,12 +51,16 @@ Prompt và ảnh tham khảo được gửi tới Codex bằng CLI đã đăng n
 
 Dự án được lưu trong `studio-data/projects/`; cài đặt thư viện ở `studio-data/settings.json`; render vẫn nằm trong `outputs/`. Các dữ liệu cục bộ này được bỏ qua bởi Git. Nhấn **Lưu dự án** trước khi đóng để giữ phần chỉnh sửa mới.
 
+Nếu render bị ngắt, bấm **Tiếp tục render** để chạy lại job đã lưu: giữ nguyên cảnh, âm thanh và thư mục assets của job, bỏ qua các khung PNG hoàn chỉnh, dựng lại các khung thiếu hoặc bị ghi dở rồi ghép MP4. **Xem render.log** mở log; lần chạy tiếp được nối vào log cũ. Thay đổi prompt hoặc cấu hình chỉ áp dụng khi tạo một job mới.
+
 ### Kiểm thử Studio
 
 ```powershell
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 # Cần server tại 8766 và Chrome để chạy kiểm thử trình duyệt:
 .\.venv\Scripts\python.exe scripts/qa_studio_browser.py http://127.0.0.1:8766
+# Kiểm tra nút tạm dừng và tiến trình trên desktop/mobile bằng API giả lập, cần Chrome:
+.\.venv\Scripts\python.exe -m scripts.qa_studio_pause
 # Dùng các GLB đã seed để kiểm tra render + mix audio thật:
 .\.venv\Scripts\python.exe scripts/smoke_studio_media.py
 # Kiểm tra AI thật (gửi một prompt và ảnh mẫu, dùng hạn mức Codex):

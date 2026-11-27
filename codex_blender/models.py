@@ -13,6 +13,7 @@ def finite(value: float) -> float:
 Number = Annotated[float, AfterValidator(finite)]
 Vec3 = tuple[Number, Number, Number]
 Color = Annotated[str, Field(pattern=r"^#[0-9a-fA-F]{6}$")]
+MAX_DURATION = 3600
 
 
 class Model(BaseModel):
@@ -20,15 +21,23 @@ class Model(BaseModel):
 
 
 class Keyframe(Model):
-    time: float = Field(ge=0, le=120)
+    time: float = Field(ge=0, le=MAX_DURATION)
     location: Vec3 | None = None
     rotation: Vec3 | None = None
     scale: Vec3 | None = None
+    visible: bool | None = None
+    opacity: float | None = Field(default=None, ge=0, le=1)
+
+
+class Repetition(Model):
+    count: int = Field(default=1, ge=1, le=500)
+    offset: Vec3 = (0, 0, 0)
+    rotation: Vec3 = (0, 0, 0)
 
 
 class Object(Model):
     name: str = Field(min_length=1, max_length=100)
-    kind: Literal["cube", "sphere", "cylinder", "cone", "torus", "plane", "text", "model", "image"]
+    kind: Literal["cube", "sphere", "cylinder", "cone", "torus", "plane", "text", "model", "image", "empty"]
     location: Vec3 = (0, 0, 1)
     rotation: Vec3 = (0, 0, 0)
     scale: Vec3 = (1, 1, 1)
@@ -37,12 +46,18 @@ class Object(Model):
     roughness: float = Field(default=0.35, ge=0, le=1)
     text: str = Field(default="", max_length=2000)
     asset: str | None = None
+    parent: str | None = None
+    visible: bool = True
+    opacity: float = Field(default=1, ge=0, le=1)
+    repeat: Repetition | None = None
     keyframes: list[Keyframe] = Field(default_factory=list, max_length=100)
 
     @model_validator(mode="after")
     def required_asset(self):
         if self.kind in ("model", "image") and not self.asset:
             raise ValueError("model/image objects require an asset path")
+        if self.asset and self.kind not in ('model','image'):
+            raise ValueError("asset must be null for primitives/text/empty; text uses the video's font")
         return self
 
 
@@ -51,24 +66,192 @@ class Camera(Model):
     target: Vec3 = (0, 0, 1)
     lens: float = Field(default=45, ge=10, le=200)
     end_location: Vec3 | None = None
+    keyframes: list["CameraKeyframe"] = Field(default_factory=list, max_length=100)
+
+
+class CameraKeyframe(Model):
+    time: float = Field(ge=0, le=MAX_DURATION)
+    location: Vec3
+    target: Vec3
+    lens: float = Field(default=45, ge=10, le=200)
+
+
+class SpeechCue(Model):
+    start: float = Field(ge=0, le=MAX_DURATION)
+    end: float = Field(gt=0, le=MAX_DURATION)
+    text: str = Field(min_length=1, max_length=15000)
+    voice_id: str = "vi-VN-NamMinhNeural"
+    rate: int = Field(default=0, ge=-50, le=100)
+    audio: str | None = None
+
+    @model_validator(mode="after")
+    def interval(self):
+        if self.end <= self.start:
+            raise ValueError("Speech end must follow its start")
+        return self
+
+
+class SoundCue(Model):
+    start: float = Field(ge=0, le=MAX_DURATION)
+    end: float = Field(gt=0, le=MAX_DURATION)
+    kind: Literal['chime','footstep','click','mechanical','whoosh','success','breath','pop','scan']
+    volume: float = Field(default=.35, ge=0, le=1)
+    audio: str | None = None
+
+
+class ElementPart(Model):
+    name: str = Field(min_length=1, max_length=100)
+    count: int = Field(default=1, ge=1, le=1000)
+
+
+class GeometryElement(Model):
+    id: str = Field(pattern=r'^[A-Za-z][A-Za-z0-9_]{0,39}$')
+    label: str = Field(min_length=1, max_length=200)
+    source: str = Field(min_length=1, max_length=3000)
+    role: Literal['setting','character','prop','graphic']
+    construction: Literal['geometry','asset','image','overlay'] = 'geometry'
+    count: int = Field(default=1, ge=1, le=1000)
+    appearance: str = Field(min_length=1, max_length=3000)
+    parts: list[ElementPart] = Field(default_factory=list, max_length=40)
+
+
+class ShotBrief(Model):
+    title: str = Field(min_length=1, max_length=200)
+    start: float = Field(ge=0, le=MAX_DURATION)
+    end: float = Field(gt=0, le=MAX_DURATION)
+    setting: str = Field(min_length=1, max_length=5000)
+    actions: list[str] = Field(min_length=1, max_length=40)
+    # Global video timestamps, so narration keeps its exact position across cuts.
+    narration: list[SpeechCue] = Field(default_factory=list, max_length=100)
+    animate: bool = True
+    elements: list[GeometryElement] = Field(default_factory=list, max_length=60)
+
+
+class ActionBinding(Model):
+    action_index: int = Field(ge=0, le=39)
+    objects: list[str] = Field(min_length=1, max_length=50)
+    start: float = Field(ge=0, le=MAX_DURATION)
+    end: float = Field(gt=0, le=MAX_DURATION)
+    elements: list[str] = Field(default_factory=list, max_length=60)
+
+
+class PartBinding(Model):
+    part: str = Field(min_length=1, max_length=100)
+    objects: list[str] = Field(min_length=1, max_length=100)
+
+
+class ElementBinding(Model):
+    element_id: str
+    objects: list[str] = Field(min_length=1, max_length=100)
+    parts: list[PartBinding] = Field(default_factory=list, max_length=40)
+
+
+class AreaLight(Model):
+    location: Vec3 = (2, -4, 8)
+    energy: float = Field(default=1800, ge=0, le=100000)
+    size: float = Field(default=6, gt=0, le=100)
+    color: Color = "#FFFFFF"
+
+
+class ShotDesign(Model):
+    background: Color = "#101828"
+    floor: Color = "#202C40"
+    ground: bool = True
+    ambient: float = Field(default=.5, ge=0, le=10)
+    lights: list[AreaLight] = Field(default_factory=lambda: [AreaLight(location=(2,-4,8)), AreaLight(location=(-5,-1,5),energy=1200), AreaLight(location=(2,5,6),energy=2200)], max_length=10)
+    camera: Camera = Field(default_factory=Camera)
+    objects: list[Object] = Field(min_length=1, max_length=150)
+    bindings: list[ActionBinding] = Field(default_factory=list, max_length=100)
+    element_bindings: list[ElementBinding] = Field(default_factory=list, max_length=60)
+
+
+class Shot(ShotBrief, ShotDesign):
+    pass
+
+
+class VideoPlan(Model):
+    title: str = Field(max_length=200)
+    duration: float = Field(gt=0, le=MAX_DURATION)
+    fps: int = Field(default=24, ge=1, le=60)
+    width: int = Field(default=540, ge=64, le=3840, multiple_of=2)
+    height: int = Field(default=960, ge=64, le=3840, multiple_of=2)
+    style: str = Field(max_length=5000)
+    characters: list[str] = Field(default_factory=list, max_length=30)
+    music: str | None = None
+    music_style: Literal['none','playful','ambient','triumphant'] = 'none'
+    effects: list[SoundCue] = Field(default_factory=list, max_length=200)
+    font: str | None = None
+    captions: bool = False
+    voice_volume: float = Field(default=1, ge=0, le=2)
+    music_volume: float = Field(default=.2, ge=0, le=1)
+    duck_music: bool = True
+    unsupported: list[str] = Field(default_factory=list, max_length=30)
+    shots: list[ShotBrief] = Field(min_length=1, max_length=60)
+
+    @model_validator(mode="after")
+    def schedule(self):
+        validate_shots(self.shots, self.duration)
+        if any(not 0 <= effect.start < effect.end <= self.duration for effect in self.effects):
+            raise ValueError("Sound effects must fit the video timeline")
+        return self
+
+
+def validate_shots(shots, duration):
+    cursor = 0
+    for shot in shots:
+        if abs(shot.start - cursor) > .001 or shot.end <= shot.start:
+            raise ValueError("Shots must form a continuous timeline starting at zero")
+        for cue in shot.narration:
+            if cue.start < shot.start or cue.end > shot.end:
+                raise ValueError("Narration must fit its shot's video timestamps")
+        cursor = shot.end
+    if abs(cursor - duration) > .001:
+        raise ValueError("Last shot must end at the full video duration")
+
+
+def validate_objects(objects, camera, duration):
+    from .geometry import expand_objects
+    expand_objects([obj.model_dump(mode='json') for obj in objects])
+    names = {obj.name for obj in objects}
+    if len(names) != len(objects):
+        raise ValueError("Object names must be unique within a shot")
+    parents = {obj.name: obj.parent for obj in objects}
+    for obj in objects:
+        chain = {obj.name}
+        parent = obj.parent
+        while parent is not None:
+            if parent not in names or parent in chain:
+                raise ValueError("Object parents must exist and must not form cycles")
+            chain.add(parent)
+            parent = parents[parent]
+        times = [key.time for key in obj.keyframes]
+        if len(times) != len(set(times)) or any(t > duration for t in times):
+            raise ValueError("Object keyframes must have unique times within the shot duration")
+    times = [key.time for key in camera.keyframes]
+    if len(times) != len(set(times)) or any(t > duration for t in times):
+        raise ValueError("Camera keyframes must have unique times within the shot duration")
 
 
 class SceneSpec(Model):
     title: str = Field(default="Codex Blender Video", max_length=200)
-    prompt: str = Field(default="", max_length=20000)
+    prompt: str = Field(default="", max_length=70002)
     content: str = Field(default="", max_length=50000)
-    duration: float = Field(default=5, ge=0.1, le=120)
+    duration: float = Field(default=5, ge=0.1, le=MAX_DURATION)
     fps: int = Field(default=24, ge=1, le=60)
     width: int = Field(default=1280, ge=64, le=3840, multiple_of=2)
     height: int = Field(default=720, ge=64, le=3840, multiple_of=2)
     background: Color = "#101828"
     floor: Color = "#202C40"
     camera: Camera = Field(default_factory=Camera)
-    objects: list[Object] = Field(min_length=1, max_length=150)
+    objects: list[Object] = Field(default_factory=list, max_length=150)
+    shots: list[Shot] = Field(default_factory=list, max_length=60)
+    captions: bool = False
     audio: str | None = None
     font: str | None = None
     voice_audio: str | None = None
     music: str | None = None
+    music_style: Literal['none','playful','ambient','triumphant'] = 'none'
+    effects: list[SoundCue] = Field(default_factory=list, max_length=200)
     voice_volume: float = Field(default=1, ge=0, le=2)
     music_volume: float = Field(default=0.2, ge=0, le=1)
     duck_music: bool = True
@@ -77,13 +260,16 @@ class SceneSpec(Model):
 
     @model_validator(mode="after")
     def timeline(self):
-        names = [obj.name for obj in self.objects]
-        if len(names) != len(set(names)):
-            raise ValueError("Object names must be unique")
-        for obj in self.objects:
-            times = [k.time for k in obj.keyframes]
-            if len(times) != len(set(times)):
-                raise ValueError("Keyframe times must be unique per object")
-            if any(t > self.duration for t in times):
-                raise ValueError("Keyframes must be inside the video duration")
+        if any(not 0 <= effect.start < effect.end <= self.duration for effect in self.effects):
+            raise ValueError("Sound effects must fit the video timeline")
+        if self.shots:
+            if self.objects:
+                raise ValueError("Use shots or legacy objects, not both")
+            validate_shots(self.shots, self.duration)
+            for shot in self.shots:
+                validate_objects(shot.objects, shot.camera, shot.end - shot.start)
+        else:
+            if not self.objects:
+                raise ValueError("A video must contain shots or objects")
+            validate_objects(self.objects, self.camera, self.duration)
         return self

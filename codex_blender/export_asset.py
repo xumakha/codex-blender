@@ -10,7 +10,10 @@ args = sys.argv[sys.argv.index("--")+1:] if "--" in sys.argv else sys.argv[1:]
 data = json.loads(Path(args[0]).read_text(encoding="utf-8"))
 bpy.context.preferences.filepaths.use_scripts_auto_execute = False
 bpy.ops.wm.open_mainfile(filepath=data["blend"], load_ui=False)
-scene = bpy.context.scene
+scene = next((scene for scene in bpy.data.scenes if all(scene.objects.get(name) for name in data['names'])), None)
+if scene is None:
+    raise ValueError("Select objects from the same shot to export an asset")
+bpy.context.window.scene = scene
 scene.frame_set(1)
 selected = set()
 for name in data["names"]:
