@@ -111,6 +111,8 @@ def projects():
     result = []
     for p in (DATA / "projects").glob("*/project.json"):
         try:
+            if json.loads(p.read_text(encoding="utf-8")).get('kind') == 'asset-generation':
+                continue
             value = read_project(p.parent.name)
             result.append({"id": value["id"], "title": value["draft"]["title"], "updated": value["updated"],
                            "state": value.get("job", {}).get("state", value["state"]),
@@ -238,7 +240,7 @@ def prepare_and_render(pid, draft, scene, root, mode):
             folder = root / "voices"
             folder.mkdir(exist_ok=True)
             path = folder / f"tts-{uuid.uuid4().hex}.mp3"
-            asyncio.run(synthesize(draft.narration, draft.voice_id, draft.rate, path))
+            asyncio.run(synthesize(draft.narration, draft.voice_id, draft.rate, path, word_timing=bool(scene.subtitles)))
             scene.voice_audio = path.relative_to(root).as_posix()
         job = submit(scene, mode, root)
         latest = read_project(pid)

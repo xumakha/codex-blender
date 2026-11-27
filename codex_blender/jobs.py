@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 
 from .config import ROOT, ASSETS, OUTPUTS, blender_command, validate_assets, assets_dir
 from .models import SceneSpec
+from .render_timing import remaining_seconds
 
 LOCK = threading.RLock()
 
@@ -47,6 +48,12 @@ def status(job_id):
             data["error"] = f"Render đã bị ngắt ở {data['frames_rendered']}/{data['frames_total']} khung hình. Bấm Tiếp tục render để dựng các khung còn thiếu; xem render.log để kiểm tra chi tiết."
     if data["state"] in {"queued", "rendering"} and (path / ".pause-requested").exists():
         data["state"] = "paused" if (path / ".paused").exists() else "pausing"
+    data['eta_seconds'] = None
+    if data.get('mode') == 'video':
+        if data['state'] == 'completed':
+            data['eta_seconds'] = 0
+        elif data['state'] == 'rendering':
+            data['eta_seconds'] = remaining_seconds(path, max(0, data['frames_total'] - data['frames_rendered']))
     return data
 
 
@@ -114,6 +121,7 @@ def retry(job_id):
             data.pop(key, None)
         for name in (".pause-requested", ".paused"):
             (path / name).unlink(missing_ok=True)
+        (path / 'render-timing.json').unlink(missing_ok=True)
         data.update(state="queued", resumed=datetime.now(timezone.utc).isoformat())
         write_json(path / "status.json", data)
         launch_worker(path, data, resume=True)

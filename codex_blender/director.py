@@ -7,7 +7,7 @@ import shutil
 import subprocess
 import uuid
 
-from .config import ROOT, asset_path, validate_assets
+from .config import ROOT, asset_path, validate_assets, codex_command
 from .library import catalog
 from .models import SceneSpec, VideoPlan, ShotDesign, Shot, validate_objects
 from .planning import prompt_contract, check_contract, check_animation, check_elements, check_inventory, normalize_inventory, signature
@@ -109,16 +109,7 @@ Provide bindings for every action, with real transform/visibility changes in the
 def call_planner(pid, draft, root, model, task, instructions, stage, validate=None):
     from .studio import project_path, strict_schema, planner_mcp_overrides
     path = project_path(pid)
-    executable = shutil.which("codex.cmd" if os.name == "nt" else "codex")
-    if not executable:
-        raise RuntimeError("Chưa tìm thấy Codex CLI; cần đăng nhập codex login.")
-    launch = [executable]
-    if os.name == "nt":
-        entry = Path(executable).parent / "node_modules" / "@openai" / "codex" / "bin" / "codex.js"
-        node = shutil.which("node")
-        if not entry.is_file() or not node:
-            raise RuntimeError("Cần Codex CLI cài qua npm và Node.js.")
-        launch = [node, str(entry)]
+    launch = codex_command()
     schema = path / f"{stage}-schema.json"
     schema.write_text(json.dumps(strict_schema(model.model_json_schema())), encoding="utf-8")
     feedback = ""
@@ -148,7 +139,8 @@ def call_planner(pid, draft, root, model, task, instructions, stage, validate=No
 
 def plan_project(pid, draft, root, auto_render=False, render_mode="video"):
     from .studio import project_path, save_project, read_project, LOCK, render_project
-    from .audio import VOICES
+    from .audio import voice_options
+    voices=[voice for voice in voice_options() if not voice.get('disabled')]
     path = project_path(pid)
     cache_key=signature(draft)
     cache=path/'compiled'
@@ -158,7 +150,7 @@ def plan_project(pid, draft, root, auto_render=False, render_mode="video"):
     assets.sort(key=lambda asset: asset['path'] not in preferred)
     common = {"prompt": draft.prompt, "style_default": draft.style,
         "output_defaults": {"fps": draft.fps, "width": draft.width, "height": draft.height},
-        "voices": VOICES, "preferred_voice_id": draft.voice_id, "preferred_voice_rate": draft.rate,
+        "voices": voices, "preferred_voice_id": draft.voice_id, "preferred_voice_rate": draft.rate,
         "preferred_assets": draft.selected_assets,
         "assets": [{key: asset[key] for key in ('path','kind','name','description')} for asset in assets[:200]]}
     contract = prompt_contract(draft.prompt)
@@ -167,7 +159,7 @@ def plan_project(pid, draft, root, auto_render=False, render_mode="video"):
         normalize_inventory(value)
         check_contract(value, contract)
         check_inventory(value, draft.prompt)
-        allowed = {voice['id'] for voice in VOICES}
+        allowed = {voice['id'] for voice in voices}
         if any(cue.voice_id not in allowed for shot in value.shots for cue in shot.narration):
             raise ValueError("Chọn voice_id trong danh sách giọng đọc được hỗ trợ")
         if value.captions and any(shot.narration for shot in value.shots) and not value.font:

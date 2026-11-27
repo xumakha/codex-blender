@@ -1,4 +1,5 @@
 import importlib.util
+import hashlib
 import os
 from pathlib import Path
 import shutil
@@ -7,6 +8,57 @@ ROOT = Path(__file__).resolve().parent.parent
 ASSETS = ROOT / "assets"
 OUTPUTS = ROOT / "outputs"
 DATA = ROOT / "studio-data"
+
+
+def elevenlabs_command() -> list[str]:
+    explicit = os.environ.get('ELEVENLABS_CLI_PATH')
+    if explicit:
+        if not Path(explicit).is_file():
+            raise ValueError('ELEVENLABS_CLI_PATH không trỏ tới file CLI hợp lệ.')
+        return [explicit]
+    local = DATA / 'tools/elevenlabs/node_modules/@elevenlabs'
+    if os.name == 'nt':
+        binary = local / 'cli-win32-x64/elevenlabs.exe'
+        if binary.is_file():
+            return [str(binary)]
+    found = shutil.which('elevenlabs.exe' if os.name == 'nt' else 'elevenlabs')
+    if found:
+        return [found]
+    launcher = local / 'cli/bin/cli.js'
+    node = shutil.which('node')
+    if launcher.is_file() and node:
+        return [node, str(launcher)]
+    raise RuntimeError('Chưa cài ElevenLabs CLI. Chạy npm install --prefix studio-data/tools/elevenlabs @elevenlabs/cli@1.14.2 trong thư mục dự án.')
+
+
+def source_revision() -> str:
+    """Fingerprint app code so the launcher can detect a stale in-memory server."""
+    package = Path(__file__).resolve().parent
+    digest = hashlib.sha256()
+    for path in sorted(package.rglob('*')):
+        if path.is_file() and path.suffix in {'.py','.js','.css','.html'}:
+            digest.update(path.relative_to(package).as_posix().encode())
+            digest.update(path.read_bytes())
+    return digest.hexdigest()[:16]
+
+
+def codex_command() -> list[str]:
+    explicit = os.environ.get("CODEX_PATH")
+    executable = explicit or shutil.which("codex.exe" if os.name == "nt" else "codex") or shutil.which("codex.cmd")
+    if not executable and os.name == "nt":
+        candidates = sorted((Path.home() / ".vscode" / "extensions").glob(
+            "openai.chatgpt-*/bin/windows-*/codex.exe"), key=lambda p: p.stat().st_mtime, reverse=True)
+        if candidates:
+            executable = str(candidates[0])
+    if not executable:
+        raise RuntimeError("Codex CLI not found. Install Codex CLI or set CODEX_PATH.")
+    if Path(executable).suffix.lower() == ".cmd":
+        entry = Path(executable).parent / "node_modules" / "@openai" / "codex" / "bin" / "codex.js"
+        node = shutil.which("node")
+        if not entry.is_file() or not node:
+            raise RuntimeError("The npm Codex installation requires Node.js and codex.js.")
+        return [node, str(entry)]
+    return [str(executable)]
 
 
 def assets_dir() -> Path:

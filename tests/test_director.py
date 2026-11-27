@@ -17,6 +17,10 @@ def shot(start=0, end=5, **extra):
 
 
 class DirectorTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        config.OUTPUTS.mkdir(exist_ok=True)
+
     def test_script_contract_keeps_all_scenes_and_exact_speech(self):
         prompt='Thời lượng: 90–120 giây\n00:00–00:10\n**Lời đọc:**\n“Xin chào!”\n00:10–01:35'
         contract=prompt_contract(prompt)
@@ -113,13 +117,20 @@ class DirectorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir=config.ROOT/'outputs') as tmp:
             root=Path(tmp);(root/'voice.wav').write_bytes(b'voice');(root/'font.ttf').write_bytes(b'font')
             spec=SceneSpec(duration=10,font='font.ttf',captions=True,shots=[shot(0,5,narration=[{'start':1,'end':3,'text':'First line','audio':'voice.wav'}]),shot(5,10,narration=[{'start':6,'end':8,'text':'Second line','audio':'voice.wav'}])])
-            with patch.object(audio.subprocess,'run') as run,patch.object(audio.imageio_ffmpeg,'get_ffmpeg_exe',return_value='ffmpeg'):
+            with patch.object(audio.subprocess,'run') as run,patch.object(audio.imageio_ffmpeg,'get_ffmpeg_exe',return_value='ffmpeg'),patch('codex_blender.captions.font_family',return_value='Arial'):
                 audio.encode_video(root,spec.model_dump(mode='json'),root)
             cmd=run.call_args.args[0];graph=cmd[cmd.index('-filter_complex')+1]
             self.assertIn('adelay=1000:all=1',graph)
             self.assertIn('adelay=6000:all=1',graph)
-            self.assertIn("gte(t,6.0)*lt(t,8.0)",cmd[cmd.index('-vf')+1])
-            self.assertEqual((root/'caption-001.txt').read_text(),'Second line')
+            self.assertIn('captions.ass',cmd[cmd.index('-vf')+1])
+            timing=json.loads((root/'caption-timing.json').read_text())
+            self.assertTrue(timing['estimated'])
+            words=timing['words']
+            self.assertEqual([w['text'] for w in words],['First','line','Second','line'])
+            self.assertEqual(words[0]['start'],1)
+            self.assertEqual(words[2]['start'],6)
+            self.assertLessEqual(words[-1]['end'],8)
+            self.assertIn('\\fscy112',(root/'captions.ass').read_text())
 
     def test_speech_never_silently_cuts_a_long_paragraph(self):
         with patch.object(audio,'audio_duration',return_value=20),patch.object(audio.subprocess,'run') as run:

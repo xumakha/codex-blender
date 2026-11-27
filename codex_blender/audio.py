@@ -4,15 +4,13 @@ import hashlib
 import json
 import os
 import re
-import ssl
 from pathlib import Path
 import subprocess
 import urllib.error
-import urllib.request
 import uuid
 import imageio_ffmpeg
 
-from .config import asset_path
+from .config import asset_path, elevenlabs_command, ROOT
 
 ELEVENLABS_VOICE_ID = "gb30mYs9RQJGV3jqCOM2"
 ELEVENLABS_MODEL = "eleven_flash_v2_5"
@@ -28,55 +26,166 @@ VOICES = [
 ]
 
 
-async def synthesize(text, voice, rate, destination):
-    if voice not in {v["id"] for v in VOICES}:
+def voice_options():
+    from .voice_clones import options
+    return VOICES + options()
+
+
+async def synthesize(text, voice, rate, destination, word_timing=False):
+    selected=next((item for item in voice_options() if item['id']==voice),None)
+    if selected is None:
         raise ValueError("Giọng đọc không hợp lệ")
+    if selected.get('disabled'):
+        raise ValueError(selected.get('status_message') or 'Giọng clone chưa sẵn sàng sử dụng.')
     if not -50 <= rate <= 100 or not text.strip() or len(text) > 15000:
         raise ValueError("Kiểm tra lời đọc (tối đa 15000 ký tự) và tốc độ giọng đọc")
-    if voice == ELEVENLABS_VOICE_ID:
-        await asyncio.to_thread(synthesize_elevenlabs, text, voice, rate, Path(destination))
+    if selected.get('provider') == 'elevenlabs':
+        await asyncio.to_thread(synthesize_elevenlabs, text, voice, rate, Path(destination), word_timing)
+        return
+    if selected.get('provider') == 'voicestudio':
+        from .local_voice import synthesize as synthesize_local
+        await asyncio.to_thread(synthesize_local, text, voice, rate, Path(destination))
         return
     import edge_tts
+    import aiohttp
     import importlib
     # Retain certificate verification while also trusting the operating system's
     # certificate store (needed for managed Windows network certificates).
     module = importlib.import_module("edge_tts.communicate")
     module._SSL_CTX.load_default_certs()
     destination = Path(destination)
-    partial = destination.with_name(destination.stem+".partial.mp3")
+    partial = destination.with_name(destination.stem+'.'+uuid.uuid4().hex+".partial.mp3")
+    metadata = partial.with_suffix('.metadata.jsonl')
+    async def connect():
+        for attempt in range(5):
+            partial.unlink(missing_ok=True)
+            metadata.unlink(missing_ok=True)
+            try:
+                # Each retry needs a new Communicate instance: its stream can
+                # only be consumed once. Keep the selected voice and full text.
+                await asyncio.wait_for(edge_tts.Communicate(text, voice, rate=f"{rate:+d}%",
+                    boundary='WordBoundary' if word_timing else 'SentenceBoundary').save(
+                    str(partial),str(metadata) if word_timing else None),timeout=40)
+                if not partial.is_file() or not partial.stat().st_size:
+                    raise edge_tts.exceptions.NoAudioReceived('Empty audio')
+                return
+            except (edge_tts.exceptions.NoAudioReceived,edge_tts.exceptions.WebSocketError,
+                    aiohttp.ClientError,TimeoutError) as exc:
+                if isinstance(exc,aiohttp.ClientResponseError) and exc.status not in {429,500,502,503,504}:
+                    raise RuntimeError(f'Microsoft Edge từ chối yêu cầu giọng {selected["name"]} (HTTP {exc.status}).') from None
+                if attempt==4:
+                    raise RuntimeError(f'Microsoft Edge chưa trả về âm thanh cho giọng {selected["name"]} sau 5 lần kết nối. Hãy thử lại sau.') from None
+                await asyncio.sleep(2**attempt)
     try:
-        await asyncio.wait_for(edge_tts.Communicate(text, voice, rate=f"{rate:+d}%").save(str(partial)), timeout=120)
-        if not partial.exists() or not partial.stat().st_size:
-            raise RuntimeError("Dịch vụ không trả về âm thanh. Hãy thử lại hoặc dùng file voice có sẵn.")
+        await asyncio.wait_for(connect(),timeout=120)
+        words=[]
+        if word_timing:
+            from .captions import save_words
+            for line in metadata.read_text(encoding='utf-8').splitlines():
+                item = json.loads(line)
+                if item['type'] == 'WordBoundary':
+                    words.append({'text': item['text'], 'start': item['offset']/1e7,
+                                  'end': (item['offset']+item['duration'])/1e7})
         partial.replace(destination)
-    except edge_tts.exceptions.NoAudioReceived as exc:
-        raise RuntimeError("Dịch vụ chưa trả về âm thanh trên kết nối này. Hãy thử lại hoặc dùng file voice có sẵn.") from exc
+        if word_timing:save_words(destination, words)
+    except TimeoutError:
+        raise RuntimeError(f'Microsoft Edge xử lý giọng {selected["name"]} quá lâu. Hãy thử lại sau.') from None
     finally:
         partial.unlink(missing_ok=True)
+        metadata.unlink(missing_ok=True)
 
 
-def synthesize_elevenlabs(text, voice, rate, destination):
-    api_key = os.environ.get("ELEVENLABS_API_KEY", "").strip()
+def elevenlabs_error(error):
+    """Translate provider error codes without exposing raw responses or credentials."""
+    try:
+        detail = json.loads(error.read(65536)).get('detail', {})
+        codes = [detail.get('status'), detail.get('code')] if isinstance(detail,dict) else []
+    except (OSError, ValueError, TypeError, AttributeError):
+        codes = []
+    return elevenlabs_message(codes, error.code)
+
+
+def elevenlabs_message(codes, status=None):
+    from .credentials import KEY_ID_WARNING
+    messages = {
+        'api_key_id_used_as_api_key': KEY_ID_WARNING,
+        'invalid_api_key': 'API key ElevenLabs không hợp lệ. Nhập lại secret key trong Cài đặt → ElevenLabs.',
+        'missing_api_key': 'Chưa có API key ElevenLabs. Nhập secret key trong Cài đặt → ElevenLabs.',
+        'quota_exceeded': 'Tài khoản ElevenLabs không đủ hạn mức để tạo đoạn voice này.',
+        'insufficient_credits': 'Tài khoản ElevenLabs không đủ hạn mức để tạo đoạn voice này.',
+        'paid_plan_required': 'Giọng ElevenLabs này là giọng thư viện, không dùng được qua API/CLI với gói Free. Cần tài khoản có quyền dùng giọng này; đổi CLI không bỏ được giới hạn gói.',
+        'missing_permissions': 'Key ElevenLabs chưa có quyền tạo giọng. Kết nối lại bằng CLI hoặc kiểm tra quyền Text to Speech của key.',
+        'voice_not_found': 'Không tìm thấy giọng ElevenLabs đã chọn. Kiểm tra voice ID và quyền truy cập trong tài khoản.',
+        'voice_access_denied': 'API key ElevenLabs chưa có quyền dùng giọng đã chọn.',
+        'model_access_denied': 'API key ElevenLabs chưa có quyền dùng model giọng đọc này.',
+        'max_character_limit_exceeded': 'Lời đọc vượt giới hạn của ElevenLabs. Chia lời đọc thành các đoạn ngắn hơn.',
+        'text_too_long': 'Lời đọc vượt giới hạn của ElevenLabs. Chia lời đọc thành các đoạn ngắn hơn.',
+        'unsupported_model': 'Model ElevenLabs không hỗ trợ yêu cầu giọng đọc này.',
+        'invalid_voice_id': 'Voice ID ElevenLabs không hợp lệ.',
+        'rate_limit_exceeded': 'ElevenLabs đang giới hạn yêu cầu. Chờ một lát rồi thử lại.',
+    }
+    for code in codes:
+        if isinstance(code,str) and code in messages:
+            return messages[code]
+    defaults = {
+        400: 'ElevenLabs từ chối yêu cầu (HTTP 400). Kiểm tra secret key, voice ID và quyền dùng giọng.',
+        401: 'API key ElevenLabs không hợp lệ hoặc đã hết hạn',
+        402: 'ElevenLabs yêu cầu quyền sử dụng hoặc gói phù hợp cho giọng này (HTTP 402).',
+        403: 'API key ElevenLabs không có quyền dùng giọng này hoặc đã hết hạn mức',
+        404: 'Không tìm thấy giọng ElevenLabs; kiểm tra quyền truy cập voice ID trong tài khoản',
+        429: 'ElevenLabs đang giới hạn yêu cầu hoặc tài khoản đã hết hạn mức',
+    }
+    return defaults.get(status, f'ElevenLabs CLI chưa tạo được âm thanh'+(f' (HTTP {status})' if status else '. Kiểm tra kết nối và cấu hình CLI.'))
+
+
+def elevenlabs_cli_error(result):
+    # CLI errors are JSON on stdout. Never echo arbitrary provider messages,
+    # subprocess commands or response bodies into the UI or logs.
+    for output in (result.stdout, result.stderr):
+        try:
+            error = json.loads(output).get('error', {})
+            detail = error.get('details', {}).get('detail', {})
+            codes = [error.get('reason')]
+            if isinstance(detail, dict):codes += [detail.get('status'),detail.get('code')]
+            return elevenlabs_message(codes, error.get('code'))
+        except (ValueError, TypeError, AttributeError):
+            continue
+    return elevenlabs_message([])
+
+
+def synthesize_elevenlabs(text, voice, rate, destination, word_timing=False):
+    from .credentials import elevenlabs_key
+    api_key = elevenlabs_key()
     if not api_key:
-        raise ValueError("Chưa cấu hình ELEVENLABS_API_KEY. Hãy đặt biến môi trường rồi khởi động lại server Studio.")
-    request = urllib.request.Request(
-        f"https://api.elevenlabs.io/v1/text-to-speech/{voice}?output_format=mp3_44100_128",
-        data=json.dumps({"text": text, "model_id": ELEVENLABS_MODEL}).encode("utf-8"),
-        headers={"xi-api-key": api_key, "Content-Type": "application/json", "Accept": "audio/mpeg"},
-        method="POST",
-    )
+        raise ValueError("Chưa cấu hình ELEVENLABS_API_KEY. Vào Cài đặt → ElevenLabs để nhập API key.")
+    from .credentials import key_format_warning
+    if key_format_warning(api_key):
+        raise ValueError(key_format_warning(api_key))
     source = destination.with_name(f"{destination.stem}.{uuid.uuid4().hex}.partial.mp3")
     adjusted = source.with_name(source.stem + ".rate.mp3")
+    words = []
     try:
-        # Use the system trust store; keep the key only in the HTTPS request header.
-        with urllib.request.urlopen(request, timeout=120, context=ssl.create_default_context()) as response:
-            content_type = response.headers.get_content_type()
-            if content_type not in {"audio/mpeg", "audio/mp3", "application/octet-stream"}:
-                raise RuntimeError("ElevenLabs không trả về file âm thanh hợp lệ")
-            with source.open("wb") as output:
-                while chunk := response.read(64 * 1024):
-                    output.write(chunk)
-        if not source.stat().st_size:
+        env = os.environ.copy()
+        env['ELEVENLABS_API_KEY'] = api_key
+        env['NODE_USE_SYSTEM_CA'] = '1'
+        command = elevenlabs_command()+['text-to-speech', 'convert_with_timestamps' if word_timing else 'convert',
+            '--voice-id',voice,'--output-format','mp3_44100_128','--no-retry','--format','json','--json','-']
+        if not word_timing:command += ['--output',str(source.resolve())]
+        result = subprocess.run(command, input=json.dumps({'text':text,'model_id':ELEVENLABS_MODEL},ensure_ascii=False),
+            capture_output=True,text=True,encoding='utf-8',timeout=120,cwd=ROOT,env=env,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name=='nt' else 0)
+        if result.returncode:
+            raise RuntimeError(elevenlabs_cli_error(result))
+        if word_timing:
+            import base64
+            from .captions import alignment_words
+            try:
+                payload=json.loads(result.stdout)
+                source.write_bytes(base64.b64decode(payload['audio_base64'],validate=True))
+                words=alignment_words(payload.get('alignment') or payload.get('normalized_alignment') or {})
+            except (ValueError,KeyError,TypeError):
+                raise RuntimeError('ElevenLabs CLI trả về dữ liệu âm thanh hoặc mốc từ không hợp lệ') from None
+        if not source.is_file() or not source.stat().st_size:
             raise RuntimeError("ElevenLabs trả về file âm thanh rỗng")
         if rate:
             # Preserve the full Studio speed range without clamping provider settings.
@@ -88,16 +197,14 @@ def synthesize_elevenlabs(text, voice, rate, destination):
             adjusted.replace(destination)
         else:
             source.replace(destination)
-    except urllib.error.HTTPError as exc:
-        messages = {
-            401: "API key ElevenLabs không hợp lệ hoặc đã hết hạn",
-            403: "API key ElevenLabs không có quyền dùng giọng này hoặc đã hết hạn mức",
-            404: "Không tìm thấy giọng ElevenLabs; kiểm tra quyền truy cập voice ID trong tài khoản",
-            429: "ElevenLabs đang giới hạn yêu cầu hoặc tài khoản đã hết hạn mức",
-        }
-        raise RuntimeError(messages.get(exc.code, f"ElevenLabs trả về lỗi HTTP {exc.code}")) from None
-    except (urllib.error.URLError, TimeoutError):
-        raise RuntimeError("Không kết nối được ElevenLabs. Kiểm tra Internet và thử lại.") from None
+        if word_timing:
+            from .captions import save_words
+            speed = 1+rate/100
+            save_words(destination, [{**w, 'start': w['start']/speed, 'end': w['end']/speed} for w in words])
+    except subprocess.TimeoutExpired:
+        raise RuntimeError('ElevenLabs CLI xử lý quá lâu. Kiểm tra kết nối và thử lại.') from None
+    except OSError:
+        raise RuntimeError('Không chạy được ElevenLabs CLI. Kiểm tra đường dẫn CLI và quyền ghi file.') from None
     finally:
         source.unlink(missing_ok=True)
         adjusted.unlink(missing_ok=True)
@@ -121,6 +228,8 @@ def fit_speech(source, destination, seconds):
     filters = f"atempo={speed:.8f},apad,atrim=duration={seconds},aresample=48000"
     subprocess.run([imageio_ffmpeg.get_ffmpeg_exe(), '-v', 'error', '-y', '-i', str(source),
                     '-af', filters, '-c:a', 'pcm_s16le', str(destination)], check=True, timeout=120)
+    from .captions import retime_words
+    retime_words(source, destination, speed)
 
 
 async def synthesize_cues(scene, root):
@@ -133,10 +242,15 @@ async def synthesize_cues(scene, root):
             digest = hashlib.sha256(f'{cue.voice_id}|{cue.rate}|{cue.text}'.encode()).hexdigest()[:24]
             source = folder / f'cue-{digest}.mp3'
             if not source.exists() or not source.stat().st_size:
-                await synthesize(cue.text, cue.voice_id, cue.rate, source)
+                await synthesize(cue.text, cue.voice_id, cue.rate, source, word_timing=scene.captions)
             destination = folder / f'cue-{digest}-{round((cue.end-cue.start)*1000)}.wav'
             if not destination.exists() or not destination.stat().st_size:
                 await asyncio.to_thread(fit_speech, source, destination, cue.end-cue.start)
+            else:
+                from .captions import load_words, retime_words
+                if load_words(source) and not load_words(destination):
+                    source_duration = await asyncio.to_thread(audio_duration, source)
+                    retime_words(source, destination, max(1, source_duration/(cue.end-cue.start)))
             cue.audio = destination.relative_to(root).as_posix()
 
 
@@ -197,16 +311,21 @@ def encode_video(path, spec, root):
         if not spec.get("font"):
             raise ValueError("Chọn font TTF/OTF để xuất phụ đề tiếng Việt")
         import shutil
-        shutil.copyfile(asset_path(spec["font"], root), path / "subtitle-font.ttf")
-        size = max(16, round(spec["width"] / 25))
-        captions = [(spec['subtitles'], None, None)] if spec.get('subtitles') else [(cue['text'], cue['start'], cue['end']) for cue in cues]
-        filters = []
-        import textwrap
-        for index, (text, start, end) in enumerate(captions):
-            name = f'caption-{index:03d}.txt'
-            (path/name).write_text('\n'.join(textwrap.wrap(text, width=max(12, round(spec['width']/(size*.55))))), encoding='utf-8')
-            enable = f":enable='gte(t,{start})*lt(t,{end})'" if start is not None else ''
-            filters.append(f"drawtext=fontfile=subtitle-font.ttf:textfile={name}:expansion=none:fontsize={size}:fontcolor=white:borderw=2:bordercolor=black:x=(w-text_w)/2:y=h*0.82"+enable)
-        cmd += ['-vf', ','.join(filters)]
+        font_dir = path / 'caption-fonts'
+        font_dir.mkdir(exist_ok=True)
+        subtitle_font = font_dir / 'subtitle-font.ttf'
+        shutil.copyfile(asset_path(spec["font"], root), subtitle_font)
+        from .captions import load_words, word_events, write_ass, font_family
+        captions = [(spec['subtitles'], 0, duration, spec.get('voice_audio'))] if spec.get('subtitles') else [
+            (cue['text'], cue['start'], cue['end'], cue.get('audio')) for cue in cues]
+        events, estimated = [], False
+        for text, start, end, audio in captions:
+            words = load_words(asset_path(audio, root)) if audio else []
+            cue_events = word_events(text, start, end, words)
+            estimated = estimated or any(event['timing'] == 'estimated' for event in cue_events)
+            events.extend(cue_events)
+        write_ass(path/'captions.ass', events, spec['width'], spec['height'], font_family(subtitle_font))
+        (path/'caption-timing.json').write_text(json.dumps({'estimated': estimated, 'words': events}, ensure_ascii=False), encoding='utf-8')
+        cmd += ['-vf', 'ass=filename=captions.ass:fontsdir=caption-fonts']
     cmd += ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-t", str(duration), str(path / "video.mp4")]
     subprocess.run(cmd, cwd=path, check=True, timeout=1800)

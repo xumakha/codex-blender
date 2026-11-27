@@ -3,11 +3,13 @@ import json
 import math
 from pathlib import Path
 import sys
+import time
 
 # Blender also executes this file directly, outside the installed app's Python environment.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from geometry import expand_objects
 from pause_control import checkpoint
+from render_timing import record_frame
 
 import bpy
 from mathutils import Vector
@@ -30,9 +32,11 @@ def render_frames(scene, frames, offset=0):
         if complete_png(target):
             continue
         checkpoint(frames.parent)
+        started = time.monotonic()
         scene.frame_set(frame)
         scene.render.filepath = str(target)
         bpy.ops.render.render(write_still=True)
+        record_frame(frames.parent, time.monotonic() - started)
 
 
 def rgba(hex_color):
@@ -274,6 +278,7 @@ def run(spec_path, assets_path, mode):
     bpy.ops.wm.read_factory_settings(use_empty=True)
     frames = output / "frames"
     frames.mkdir(exist_ok=True)
+    (output / 'render-timing.json').unlink(missing_ok=True)
     scenes = []
     if spec.get("shots"):
         for index, shot in enumerate(spec["shots"]):

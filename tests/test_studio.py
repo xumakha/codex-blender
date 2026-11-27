@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import patch
 from starlette.testclient import TestClient
 
-from codex_blender import config, studio, library, jobs, audio
+from codex_blender import config, studio, library, jobs, audio, credentials
 from codex_blender.models import SceneSpec, VideoPlan, ShotDesign
 from codex_blender.webapp import app
 
@@ -14,13 +14,19 @@ HEADERS={"X-Studio-Request":"1"}
 
 
 class StudioTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        config.OUTPUTS.mkdir(exist_ok=True)
+
     def setUp(self):
+        config.OUTPUTS.mkdir(exist_ok=True)
         self.tmp=tempfile.TemporaryDirectory(dir=config.ROOT/"outputs")
         self.root=Path(self.tmp.name)
         self.assets=self.root/"assets"
         self.assets.mkdir()
         self.data=self.root/"data"
         self.patches=[patch.object(config,"DATA",self.data),patch.object(studio,"DATA",self.data),
+                      patch.object(credentials,'ENV_FILE',self.root/'.env'),
                       patch.object(library,"DATA",self.data),patch.object(config,"ASSETS",self.assets),
                       patch.object(library,"ASSETS",self.assets)]
         for item in self.patches:item.start()
@@ -40,6 +46,55 @@ class StudioTests(unittest.TestCase):
         saved=self.client.put('/api/projects/'+p['id'],json=draft)
         self.assertEqual(saved.status_code,200)
         self.assertEqual(self.client.get('/api/projects/'+p['id']).json()['draft']['title'],'Dự án kiểm thử')
+
+    def test_api_returns_json_for_missing_routes_and_unhandled_failures(self):
+        response=self.client.get('/api/unknown-feature')
+        self.assertEqual(response.status_code,404)
+        self.assertIn('start-studio.cmd',response.json()['error'])
+        response=self.client.patch('/api/library',json={})
+        self.assertEqual(response.status_code,405)
+        self.assertIsInstance(response.json()['error'],str)
+        with patch.object(library,'catalog',side_effect=TypeError('internal-test-detail')),patch('codex_blender.webapp.LOGGER.exception'):
+            response=self.client.get('/api/library')
+        self.assertEqual(response.status_code,500)
+        self.assertIn('request_id',response.json())
+        self.assertNotIn('internal-test-detail',response.text)
+
+    def test_bootstrap_identifies_loaded_server_revision(self):
+        from codex_blender.webapp import SERVER_REVISION
+        response=self.client.get('/api/bootstrap')
+        self.assertEqual(response.json()['server_revision'],SERVER_REVISION)
+        self.assertEqual(response.headers['cache-control'],'no-store')
+        self.assertEqual(self.client.get('/app.js').headers['cache-control'],'no-cache')
+
+    def test_elevenlabs_key_is_saved_used_and_never_returned(self):
+        from codex_blender import credentials
+        with patch.dict(os.environ, {'ELEVENLABS_API_KEY': ''}):
+            endpoint = '/api/credentials/elevenlabs'
+            self.assertFalse(self.client.get(endpoint).json()['configured'])
+            self.assertEqual(self.client.post(endpoint, json={'api_key': 'bad key'}).status_code, 400)
+            response = self.client.post(endpoint, json={'api_key': 'test-secret'})
+            self.assertEqual(response.status_code, 200)
+            self.assertTrue(response.json()['configured'])
+            self.assertEqual(credentials.elevenlabs_key(), 'test-secret')
+            for url in [endpoint, '/api/bootstrap', '/api/library']:
+                self.assertNotIn('test-secret', self.client.get(url).text)
+            self.assertEqual(self.client.post(endpoint, json={'api_key': ''}, headers={'Origin': 'https://example.com'}).status_code, 403)
+            self.assertFalse(self.client.delete(endpoint).json()['configured'])
+            self.assertFalse((self.data / 'credentials.json').exists())
+
+    def test_elevenlabs_key_id_cannot_replace_existing_secret(self):
+        from codex_blender import credentials
+        credentials.save_elevenlabs('sk_test-existing')
+        response=self.client.post('/api/credentials/elevenlabs',json={'api_key':'a'*64})
+        self.assertEqual(response.status_code,400)
+        self.assertIn('ID của API key',response.json()['error'])
+        self.assertEqual(credentials.elevenlabs_key(),'sk_test-existing')
+        (self.data/'credentials.json').write_text(json.dumps({'elevenlabs_api_key':'a'*64}))
+        result=self.client.get('/api/credentials/elevenlabs').json()
+        self.assertFalse(result['configured'])
+        self.assertIn('warning',result)
+        self.assertNotIn('a'*64,json.dumps(result))
 
     def test_library_upload_and_folder_switch(self):
         response=self.client.post('/api/uploads',data={'category':'references'},files={'file':('mood.png',b'png-test','image/png')})
@@ -74,9 +129,7 @@ class StudioTests(unittest.TestCase):
             output.write_text(value.model_dump_json(),encoding='utf-8')
             class Result:returncode=0
             return Result()
-        # Use an actual-shaped npm path so Windows command construction remains exercised.
-        exe=str(Path('C:/Users/thanh/AppData/Roaming/npm/codex.cmd'))
-        with patch.object(studio.shutil,'which',side_effect=lambda n:exe if 'codex' in n else 'node'),patch.object(studio.subprocess,'run',side_effect=fake_run),patch.object(studio,'render_project') as render:
+        with patch('codex_blender.director.codex_command',return_value=['codex']),patch.object(studio.subprocess,'run',side_effect=fake_run),patch.object(studio,'render_project') as render:
             studio.plan_scene(p['id'],studio.Draft.model_validate(p['draft']),self.assets,auto_render=True)
             render.assert_called_once_with(p['id'],'video')
         saved=studio.read_project(p['id'])
@@ -123,6 +176,27 @@ class StudioTests(unittest.TestCase):
             response=self.client.post('/api/voice-preview',json={'voice':audio.ELEVENLABS_VOICE_ID,'text':'Xin chào!'})
         self.assertEqual(response.status_code,400)
         self.assertIn('ELEVENLABS_API_KEY',response.json()['error'])
+
+    def test_edge_preview_reuses_success_only_for_matching_voice_rate_and_text(self):
+        import codex_blender.webapp as webapp
+        async def generate(text,voice,rate,destination):
+            destination.write_bytes(b'generated audio')
+        body={'voice':'vi-VN-NamMinhNeural','text':'Xin chào!','rate':0}
+        with patch.object(webapp,'synthesize',side_effect=generate) as synthesize:
+            first=self.client.post('/api/voice-preview',json=body)
+            self.assertEqual(first.status_code,200,first.text)
+            second=self.client.post('/api/voice-preview',json=body)
+            self.assertEqual(first.json()['path'],second.json()['path'])
+            self.assertEqual(synthesize.call_count,1)
+            for change in [{'rate':20},{'text':'Nội dung khác'},{'voice':'vi-VN-HoaiMyNeural'}]:
+                result=self.client.post('/api/voice-preview',json={**body,**change})
+                self.assertEqual(result.status_code,200,result.text)
+                self.assertNotEqual(first.json()['path'],result.json()['path'])
+            self.assertEqual(synthesize.call_count,4)
+            (self.assets/first.json()['path']).write_bytes(b'')
+            result=self.client.post('/api/voice-preview',json=body)
+            self.assertEqual(result.status_code,200,result.text)
+            self.assertEqual(synthesize.call_count,5)
 
     def test_retime_and_audio_configuration(self):
         scene=SceneSpec(duration=5,objects=[{'name':'box','kind':'cube','keyframes':[{'time':5,'rotation':[0,0,90]}]}])

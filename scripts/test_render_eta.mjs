@@ -1,0 +1,18 @@
+import assert from 'node:assert/strict';
+import {readFile} from 'node:fs/promises';
+const source=await readFile(new URL('../codex_blender/web/render-eta.js',import.meta.url),'utf8');
+const {renderETA}=await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
+const job={mode:'video',frames_rendered:10,frames_total:100,eta_seconds:90};
+assert.equal(renderETA(job,'rendering'),'Còn khoảng 2 phút');
+assert.equal(renderETA({...job,eta_seconds:35},'rendering'),'Còn khoảng 35 giây');
+assert.equal(renderETA({...job,eta_seconds:3700},'rendering'),'Còn khoảng 1 giờ 2 phút');
+assert.equal(renderETA({...job,eta_seconds:null},'rendering'),'Đang ước tính…');
+assert.equal(renderETA({...job,eta_seconds:NaN},'rendering'),'Đang ước tính…');
+assert.equal(renderETA(job,'paused'),'Đã tạm dừng');
+assert.equal(renderETA(job,'encoding'),'Đang hoàn tất MP4…');
+assert.equal(renderETA({...job,frames_rendered:100},'rendering'),'Đang hoàn tất MP4…');
+assert.equal(renderETA(job,'completed'),'Đã hoàn tất');
+assert.equal(renderETA(job,'failed'),'');
+assert.equal(renderETA({...job,mode:'preview'},'rendering'),'');
+assert.equal(renderETA(job,'planning'),'');
+console.log('12 render ETA display checks passed');

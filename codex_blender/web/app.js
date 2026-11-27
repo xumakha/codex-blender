@@ -1,3 +1,6 @@
+import {initAssetGenerator} from './assetgen.js';
+import {api} from './api.js';
+import {renderETA} from './render-eta.js';
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const icon = name => `<svg aria-hidden="true"><use href="#i-${name}"/></svg>`;
@@ -6,14 +9,6 @@ const jobURL = (id, name) => `/api/jobs/${id}/${name}`;
 const S = {project:null, assets:[], projects:[], voices:[], page:'studio', tab:'script', kind:'all', voiceMode:'none', poll:null, dirty:false, fileCategory:'images', fileHandler:null};
 let toastTimer;
 function toast(message, error=false) { $('toast').textContent=message; $('toast').classList.toggle('error',error); $('toast').hidden=false; clearTimeout(toastTimer); toastTimer=setTimeout(()=>$('toast').hidden=true,error?7000:3500); }
-async function api(url, options={}) {
-  const headers={'X-Studio-Request':'1',...options.headers};
-  if(options.body && !(options.body instanceof FormData)) { headers['Content-Type']='application/json'; options.body=JSON.stringify(options.body); }
-  const response=await fetch(url,{...options,headers});
-  const body=await response.json().catch(()=>({error:'Máy chủ không trả về dữ liệu hợp lệ'}));
-  if(!response.ok) throw new Error(body.error||`Lỗi ${response.status}`);
-  return body;
-}
 const safe = fn => async (...args) => { try {await fn(...args);} catch(error) {toast(error.message,true);} };
 const numeric=['fps','samples','rate','voice-volume','music-volume'];
 const fields=['title','prompt','style','fps','samples','voice-id','voice-file','narration','rate','voice-volume','music','music-volume','duck-music','subtitles','font'];
@@ -77,9 +72,10 @@ function busy(){ const p=S.project;return p&&(['planning','preparing_audio','exp
 function renderRecent(){ $('recent-projects').innerHTML=S.projects.slice(0,8).map(p=>`<button data-project="${p.id}" class="${p.id===S.project?.id?'active':''}" title="${esc(p.title)}">${esc(p.title)}</button>`).join('')||'<p class="helper" style="padding:0 14px">Chưa có dự án</p>'; }
 function showTab(tab){ S.tab=tab;for(const node of document.querySelectorAll('[data-tab]')){const on=node.dataset.tab===tab;node.classList.toggle('active',on);node.setAttribute('aria-selected',on);}for(const t of ['script','art','audio','output'])$(`tab-${t}`).hidden=t!==tab; }
 function showPage(page){
-  S.page=page;for(const p of ['studio','library','history','settings'])$(`page-${p}`).hidden=p!==page;
+  S.page=page;for(const p of ['studio','assetgen','library','history','settings'])$(`page-${p}`).hidden=p!==page;
   document.querySelectorAll('#nav [data-page]').forEach(n=>n.classList.toggle('active',n.dataset.page===page));
-  $('breadcrumb').textContent={studio:'Video studio',library:'Thư viện assets',history:'Lịch sử render',settings:'Cài đặt'}[page];
+  $('breadcrumb').textContent={studio:'Video studio',assetgen:'Tạo asset từ ảnh',library:'Thư viện assets',history:'Lịch sử render',settings:'Cài đặt'}[page];
+  if(page==='assetgen')safe(assetGenerator.load)();
   if(page==='library')safe(loadLibrary)(); if(page==='history')safe(loadHistory)();
 }
 function updateMetrics(){
@@ -106,7 +102,9 @@ function updateAudio(){
   $('voice-options').hidden=!['auto','tts'].includes(S.voiceMode);
   const voice=S.voices.find(v=>v.id===$('voice-id').value);
   $('voice-provider-note').textContent=voice?.provider==='elevenlabs'
-    ?'ElevenLabs gửi lời đọc tới API ElevenLabs và sử dụng hạn mức tài khoản. Cần đặt ELEVENLABS_API_KEY trên máy rồi khởi động lại server Studio.'
+    ?'ElevenLabs CLI dùng key trên máy để tạo voice. Giọng đã chọn cần được tài khoản cho phép sử dụng; dùng Nghe thử giọng để kiểm tra.'
+    :voice?.provider==='voicestudio'
+    ?'Giọng clone VoiceStudio chạy trên máy, không cần API key. Tạo voice có thể mất vài phút; phụ đề dùng mốc từ ước tính. Model hiện tại chỉ dùng phi thương mại.'
     :'Giọng Microsoft Edge cần Internet và gửi lời đọc tới dịch vụ Microsoft Edge.';
   document.querySelectorAll('[data-voice]').forEach(n=>n.classList.toggle('active',n.dataset.voice===S.voiceMode));
   for(const [selector,player] of [['voice-file','uploaded-voice-player'],['music','music-player']]){const path=$(selector).value;$(player).hidden=!path;if(path&&$(player).dataset.path!==path){$(player).src=assetURL(path);$(player).dataset.path=path;}}
@@ -153,6 +151,10 @@ function updateProjectStatus(){
   if(determinate||working==='completed')$('progress-track').setAttribute('aria-valuenow',percent);
   else $('progress-track').removeAttribute('aria-valuenow');
   $('progress-count').textContent=determinate?`${percent}% · ${job.frames_rendered} / ${job.frames_total} khung hình`:working==='completed'?'100%':'';
+  const eta=renderETA(job,working);
+  $('progress-eta').hidden=!eta;
+  $('progress-eta').textContent=eta;
+  $('progress-eta').title='Ước tính theo tốc độ các khung hình gần đây, không tính thời gian tạm dừng. Bước ghép âm thanh và xuất MP4 có thể cần thêm thời gian.';
   $('pause-render').hidden=!['queued','rendering','pausing','paused'].includes(working);
   $('pause-render').disabled=!!S.controlPending;
   $('pause-render').textContent=['pausing','paused'].includes(working)?'Tiếp tục':'Tạm dừng';
@@ -186,7 +188,7 @@ async function loadLibrary(){
   $('asset-count').textContent=S.assets.filter(a=>a.kind==='model').length;
   $('sidebar-folder').textContent=data.settings.assets_directory;$('sidebar-folder').title=data.settings.assets_directory;
   $('library-path').textContent=data.settings.assets_directory;$('assets-directory').value=data.settings.assets_directory;
-  populateAssetSelects();renderPreferred();renderLibrary();
+  populateAssetSelects();renderPreferred();renderLibrary();assetGenerator.images();
 }
 function bytes(value){return value>1024*1024?`${(value/1024/1024).toFixed(1)} MB`:`${Math.max(1,Math.round(value/1024))} KB`;}
 function renderLibrary(){
@@ -224,16 +226,33 @@ async function openExport(){
   $('export-objects').innerHTML=objects.map(o=>`<label><input type="checkbox" value="${esc(o.name)}">${esc(o.name)} <span class="muted">· ${esc(o.kind)}</span></label>`).join('');
   $('asset-name').value='';$('asset-description').value='';$('asset-tags').value='';$('export-dialog').showModal();
 }
+function showElevenlabsStatus(data){
+  $('elevenlabs-key-status').textContent=data.warning||(data.configured?(data.source==='project-env'?'Đang dùng key từ .env do ElevenLabs CLI cấu hình.':data.source==='saved'?'Đang dùng API key đã lưu trong Cài đặt.':'Đang dùng API key từ biến môi trường.'):'Chưa cấu hình API key.');
+  $('delete-elevenlabs-key').disabled=!data.saved;
+}
+$('save-elevenlabs-key').onclick=safe(async()=>{
+  const field=$('elevenlabs-api-key');
+  const button=$('save-elevenlabs-key');button.disabled=true;
+  try {showElevenlabsStatus(await api('/api/credentials/elevenlabs',{method:'POST',body:{api_key:field.value}}));field.value='';toast('Đã lưu API key ElevenLabs');}
+  finally {button.disabled=false;}
+});
+$('delete-elevenlabs-key').onclick=safe(async()=>{
+  showElevenlabsStatus(await api('/api/credentials/elevenlabs',{method:'DELETE'}));$('elevenlabs-api-key').value='';toast('Đã xóa key đã lưu');
+});
 async function boot(){
+  showElevenlabsStatus(await api('/api/credentials/elevenlabs'));
   const data=await api('/api/bootstrap');Object.assign(S,{assets:data.assets,projects:data.projects,settings:data.settings,voices:data.voices});
   $('connection-dot').classList.toggle('ready',data.blender_ready);$('connection-label').textContent=data.blender_ready?'Blender sẵn sàng':'Blender chưa sẵn sàng';
   $('health-cards').innerHTML=`<div class="health-card">Blender<small>${data.blender_ready?'Sẵn sàng render':esc(data.blender_error)}</small></div><div class="health-card">Codex CLI<small>${data.codex_available?'Đã tìm thấy CLI trên máy':'Chưa tìm thấy — hãy cài Codex CLI'}</small></div>`;
-  $('voice-id').innerHTML=data.voices.map(v=>`<option value="${esc(v.id)}">${[v.name,v.language,v.gender].filter(Boolean).map(esc).join(' · ')}</option>`).join('');
+  $('voice-id').innerHTML=data.voices.map(v=>`<option value="${esc(v.id)}" ${v.disabled?'disabled':''}>${[v.name,v.disabled?(v.status==='verification'?'Chờ xác minh':'Chưa clone'):v.language,v.gender].filter(Boolean).map(esc).join(' · ')}</option>`).join('');
+  const pendingVoices=data.voices.filter(v=>v.disabled);
+  $('voice-clone-notice').hidden=!pendingVoices.length;
+  $('voice-clone-notice').textContent=pendingVoices.map(v=>`${v.name}: ${v.status_message||'Giọng clone chưa sẵn sàng.'}`).join(' ');
   await loadLibrary();
   const stored=localStorage.getItem('frame-project'), found=data.projects.find(p=>p.id===stored)||data.projects[0];
   if(found)setForm(await api(`/api/projects/${found.id}`));else setForm(await api('/api/projects',{method:'POST',body:{}}));
   S.projects=await api('/api/projects');renderRecent();
-  const page=location.hash.slice(1);if(['studio','library','history','settings'].includes(page))showPage(page);
+  const page=location.hash.slice(1);if(['studio','assetgen','library','history','settings'].includes(page))showPage(page);
   S.poll=setInterval(poll,2500);
 }
 for(const id of fields){$(id).addEventListener('input',()=>{markDirty();updateMetrics();if(['music','voice-file','voice-id'].includes(id))updateAudio();});}
@@ -301,4 +320,9 @@ document.addEventListener('click',safe(async event=>{
 }));
 $('preferred-assets').addEventListener('change',()=>{S.project.draft.selected_assets=[...$('preferred-assets').querySelectorAll('input:checked')].map(e=>e.value);markDirty();});
 window.addEventListener('beforeunload',event=>{if(S.dirty){event.preventDefault();event.returnValue='';}});
+const assetGenerator=initAssetGenerator({$,api,esc,icon,safe,toast,chooseFile,assetURL,loadLibrary,getAssets:()=>S.assets,useAsset:async path=>{
+  if(busy())throw new Error('Chờ dự án hiện tại hoàn tất tác vụ');
+  if(!S.project.draft.selected_assets.includes(path))S.project.draft.selected_assets.push(path);
+  renderPreferred();markDirty();showPage('studio');showTab('art');toast('Đã thêm asset vào dự án');
+}});
 boot().catch(error=>{$('connection-label').textContent='Không kết nối được máy chủ';toast(error.message,true);});

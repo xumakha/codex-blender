@@ -7,7 +7,7 @@ name = "codex-blender"
 version = "0.1.0"
 description = "Local Codex MCP tools for prompt-directed Blender videos"
 requires-python = ">=3.11"
-dependencies = ["mcp>=1.20,<2", "pydantic>=2.10,<3", "imageio-ffmpeg>=0.6,<0.7", "psutil>=6,<8", "starlette>=0.46,<2", "uvicorn>=0.30,<1", "python-multipart>=0.0.18", "edge-tts>=7,<8"]
+dependencies = ["mcp>=1.20,<2", "pydantic>=2.10,<3", "imageio-ffmpeg>=0.6,<0.7", "psutil>=6,<8", "starlette>=0.46,<2", "uvicorn>=0.30,<1", "python-multipart>=0.0.18", "edge-tts>=7,<8", "python-dotenv>=1,<2"]
 
 [project.scripts]
 codex-blender = "codex_blender.cli:main"

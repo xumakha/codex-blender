@@ -83,7 +83,9 @@ pydantic-settings==2.16.3
 pyjwt==2.15.1
     # via mcp
 python-dotenv==1.2.4
-    # via pydantic-settings
+    # via
+    #   codex-blender (pyproject.toml)
+    #   pydantic-settings
 python-multipart==0.0.34
     # via
     #   codex-blender (pyproject.toml)
@@ -109,12 +111,16 @@ tabulate==0.10.0
     # via edge-tts
 typing-extensions==4.16.0
     # via
+    #   aiohttp
+    #   aiosignal
     #   anyio
     #   edge-tts
     #   mcp
     #   pydantic
     #   pydantic-core
     #   pydantic-settings
+    #   referencing
+    #   starlette
     #   typing-inspection
 typing-inspection==0.4.5
     # via

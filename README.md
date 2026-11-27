@@ -6,6 +6,16 @@ Luồng hoạt động: **prompt/nội dung trong Codex → mô tả cảnh JSON
 
 ## Giao diện tạo video — Frame Studio
 
+### Tạo asset từ ảnh
+
+Tab **Tạo asset từ ảnh** nhận 1–4 ảnh PNG/JPG của cùng một đối tượng, tên asset, mô tả bổ sung và phong cách. Codex phân tích ảnh thật; Blender dựng mô hình bằng hình học 3D, render preview rồi xuất GLB tĩnh có vật liệu vào thư viện. Có thể tải GLB/file Blender hoặc bấm **Dùng trong dự án** để ưu tiên mô hình trong video hiện tại.
+
+Chọn **Nhiều asset từ một ảnh** nếu ảnh chứa nhiều đồ vật. Chọn tối đa 5/10/20/40 món, nhập tên bộ assets và thêm đúng một ảnh. Có thể ghi tên các món cần lấy trong phần chi tiết hoặc để trống để tự nhận diện. Các góc nhìn trùng của cùng đồ vật được gộp lại; mỗi món có GLB, preview và file Blender riêng. Tiến trình và lỗi hiển thị theo từng món; những món thành công vẫn được giữ trong thư viện khi món khác lỗi.
+
+Đây là bản diễn giải hình dáng/màu sắc từ ảnh, phù hợp với vật thể có cấu trúc rõ; không phải quét 3D hay bảo đảm tái tạo chính xác các mặt khuất. Các ảnh đầu vào được gửi tới Codex khi bấm dựng. Tác vụ và log được lưu trên máy, có thể theo dõi sau khi tải lại trang; tác vụ bị ngắt khi server khởi động lại có thể lấy lại đầu vào để thử lại.
+
+Kiểm tra luồng Blender/GLB bằng `python scripts/smoke_assetgen.py`. Thêm `--live` để thử Codex với ảnh tổng hợp do bài test tự render. `python scripts/qa_assetgen_browser.py` kiểm tra giao diện trên server test cổng 8766 bằng Chrome và Playwright.
+
 Chạy `start-studio.cmd` (nhấp đúp trên Windows), rồi mở **http://127.0.0.1:8765**. Hoặc chạy:
 
 ```powershell
@@ -23,18 +33,27 @@ Trong Studio:
 5. Bấm **Tạo video** để biên soạn toàn bộ timeline, dựng bối cảnh và chuyển động của từng cảnh, tạo âm thanh rồi render MP4. Danh sách **Phân cảnh theo prompt** cho xem mốc thời gian, hành động và lời thoại. Mỗi hành động phải gắn với đối tượng có chuyển động; chỉ di chuyển camera không đủ. Nếu prompt hoặc đầu vào dựng đã đổi, bấm xuất/preview sẽ lập kế hoạch mới thay vì dùng lại cảnh cũ.
 6. Khi Blender đang render, thanh tiến trình hiển thị **phần trăm và số khung hình**. Bấm **Tạm dừng** để dừng sau khung hình đang xử lý; **Tiếp tục** dựng tiếp và giữ các khung đã xong. Thời gian tạm dừng không tính vào giới hạn thời gian render. Nút này có trong giai đoạn chờ/render, trước bước ghép MP4; bước lập kế hoạch và tạo âm thanh chỉ hiển thị trạng thái xử lý.
 
-Prompt và ảnh tham khảo được gửi tới Codex bằng CLI đã đăng nhập trên máy. Dịch vụ voice online dùng `edge-tts` (Microsoft Edge) hoặc ElevenLabs theo giọng đã chọn, cần Internet. Voice/nhạc được ghép trên máy. Ứng dụng có thể tổng hợp nhạc nền đơn giản và hiệu ứng hoạt hình (chuông, bước chân, máy móc, click, quét, gió, thở, pop) theo timeline; dùng file trong thư viện khi cần bản thu cụ thể. Tool không nhân bản giọng nói.
+Prompt và ảnh tham khảo được gửi tới Codex bằng CLI đã đăng nhập trên máy. Dịch vụ voice online dùng `edge-tts` (Microsoft Edge) hoặc ElevenLabs theo giọng đã chọn, cần Internet. Giọng clone VoiceStudio đã đăng ký dùng bộ tạo giọng và model cài trên máy. Voice/nhạc được ghép trên máy. Ứng dụng có thể tổng hợp nhạc nền đơn giản và hiệu ứng hoạt hình (chuông, bước chân, máy móc, click, quét, gió, thở, pop) theo timeline; dùng file trong thư viện khi cần bản thu cụ thể.
 
 Đã thêm giọng ElevenLabs **`gb30mYs9RQJGV3jqCOM2`** vào **Âm thanh → Giọng đọc ưu tiên**, dùng được cho **Theo prompt**, **Voice AI** và **Nghe thử giọng**. Chọn giọng này để dùng cho người thuyết minh chính; yêu cầu giọng cụ thể trong prompt được ưu tiên. Tích hợp dùng [Text to Speech API](https://elevenlabs.io/docs/api-reference/text-to-speech/convert) với model `eleven_flash_v2_5` có hỗ trợ tiếng Việt ([danh sách model](https://elevenlabs.io/docs/overview/models)). Lời đọc được gửi tới ElevenLabs và sử dụng hạn mức của tài khoản; tài khoản/API key phải có quyền truy cập voice ID này.
 
-Đặt API key trong PowerShell trước khi khởi động server Studio:
+Giọng Microsoft Edge tự kết nối lại tối đa 5 lần khi dịch vụ ngắt kết nối hoặc chưa trả âm thanh, với tổng thời gian chờ tối đa 120 giây. Giữ nguyên giọng, lời đọc, tốc độ và mốc từ của phụ đề. Nghe thử cùng nội dung/giọng/tốc độ dùng lại file đã tạo thành công để giảm phụ thuộc kết nối.
+
+Studio gọi **ElevenLabs CLI** cho cả nghe thử, voice video và mốc từ của phụ đề. Cài CLI một lần trong workspace rồi đăng nhập:
 
 ```powershell
-$env:ELEVENLABS_API_KEY = "YOUR_ELEVENLABS_API_KEY"
+npm.cmd install --prefix studio-data/tools/elevenlabs @elevenlabs/cli@1.14.2
+npx.cmd -y @elevenlabs/cli@latest onboard init
 .\start-studio.cmd
 ```
 
-Nếu server Studio đang chạy, dừng server cũ trước rồi chạy lại từ cửa sổ PowerShell đã đặt biến. Key chỉ được đọc từ môi trường của server, không lưu trong dự án hoặc gửi tới Codex/trình duyệt. Các giọng Microsoft Edge vẫn dùng được khi chưa cấu hình key ElevenLabs.
+CLI lưu key trong `.env` đã được Git bỏ qua. Studio đọc key ở phía server và truyền vào môi trường tiến trình CLI, không đưa key vào lệnh, dự án hoặc trình duyệt. Key mới từ CLI thay key cũ trong Cài đặt; nếu lưu key khác trong Cài đặt sau đó thì key vừa lưu được ưu tiên. Có thể đặt `ELEVENLABS_CLI_PATH` để dùng binary ở vị trí khác. Các giọng Microsoft Edge vẫn dùng được khi chưa cấu hình ElevenLabs.
+
+Lỗi `paid_plan_required` nghĩa là gói tài khoản chưa có quyền dùng giọng thư viện qua API/CLI, khác với `quota_exceeded` (hết credits). Chuyển sang CLI không thay đổi quyền của gói tài khoản và không tự chọn giọng khác.
+
+Đăng ký một giọng clone từ file mẫu bằng lệnh `.venv\Scripts\python.exe -m codex_blender.voice_clones --name "Tuấn Anh" --sample "ĐƯỜNG_DẪN_FILE_MẪU.mp3"`. Lệnh dùng ElevenLabs CLI, giữ bản sao mẫu trong `studio-data/voice-samples` và lưu trạng thái trong `studio-data/voice-clones.json`. Chỉ giọng có voice ID thật và không cần xác minh mới được chọn để tạo speech. Nếu tài khoản chưa có quyền Instant Voice Cloning, giọng xuất hiện ở trạng thái **Chưa clone**; chạy lại lệnh khi có quyền phù hợp sẽ cập nhật cùng mục giọng, không thêm mục trùng. Key và file mẫu không được gửi tới Codex.
+
+Giọng **Tuấn Anh** trong workspace này đã được chuyển sang VoiceStudio local, dùng mẫu người dùng cung cấp. Chọn **Âm thanh → Giọng đọc ưu tiên → Tuấn Anh**, rồi **Nghe thử giọng**. Bộ cài, model Q8, file mẫu WAV và bản chép lời nằm trong `D:\VoiceStudio`; không cần mở ứng dụng VoiceStudio hoặc đăng nhập ElevenLabs. Studio gọi trực tiếp binary OmniVoice GGUF đi kèm VoiceStudio bằng Vulkan trên GPU, tạo từng đoạn tuần tự để hạn chế thiếu bộ nhớ. Cấu hình đường dẫn riêng nằm trong mục `local` của `studio-data/voice-clones.json`, không gửi tới trình duyệt. Giữ thư mục trên ổ D khi di chuyển workspace. Model GGUF hiện tại chỉ dành cho mục đích phi thương mại theo [tài liệu engine VoiceStudio](https://github.com/debpalash/VoiceStudio/blob/v0.5.8/docs/engines/omnivoice-gguf.md). Engine chưa trả mốc từ; phụ đề dùng thời gian ước tính. Kiểm tra thực tế nút nghe thử và giải mã âm thanh bằng `.venv\Scripts\python.exe scripts/qa_local_voice_browser.py` khi Studio đang chạy.
 
 Luồng dựng hỗ trợ nhiều cảnh 3D, nhóm bộ phận có khớp/pivot, transform, xuất hiện/ẩn đối tượng, camera keyframes và ánh sáng riêng từng cảnh. Mô hình GLB tĩnh không tự có rig; AI phải dựng bộ phận tách rời cho động tác cần khớp. Yêu cầu vượt khả năng dựng/âm thanh được báo lỗi thay vì âm thầm bỏ cảnh. Việc kiểm tra timeline và chuyển động không bảo đảm mọi chi tiết hình ảnh được diễn giải chính xác; xem preview trước khi render chất lượng cao.
 
