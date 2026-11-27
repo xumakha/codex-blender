@@ -258,26 +258,34 @@ def encode_video(path, spec, root):
     duration = max(1, round(spec["duration"] * spec["fps"])) / spec["fps"]
     cmd = [imageio_ffmpeg.get_ffmpeg_exe(), "-y", "-framerate", str(spec["fps"]), "-start_number", "1", "-i", str(path / "frames" / "frame_%04d.png")]
     cues = [cue for shot in spec.get('shots', []) for cue in shot.get('narration', [])]
-    if any(not cue.get('audio') for cue in cues):
+    music_only = spec.get('audio_mode') == 'music_only'
+    if not music_only and any(not cue.get('audio') for cue in cues):
         raise ValueError("Lời thoại trong timeline chưa được tạo thành âm thanh")
-    voice = bool(spec.get("voice_audio") or cues)
+    voice = not music_only and bool(spec.get("voice_audio") or cues)
     music = spec.get("music") or spec.get("audio")
+    music_cues = [] if music_only else spec.get('music_cues', [])
+    if any(not cue.get('audio') for cue in music_cues):
+        raise ValueError('Nhạc từng đoạn chưa được tạo theo timeline')
+    tracks = [(cue['audio'], cue['start'], cue['end'], cue['volume']) for cue in music_cues]
+    if not tracks and music:
+        tracks = [(music, 0, duration, 1)]
+    music = bool(tracks)
     voices = []
-    if spec.get('voice_audio'):
+    if not music_only and spec.get('voice_audio'):
         voices.append((spec['voice_audio'], 0, duration))
-    voices += [(cue['audio'], cue['start'], cue['end']-cue['start']) for cue in cues]
+    if not music_only:voices += [(cue['audio'], cue['start'], cue['end']-cue['start']) for cue in cues]
     for path_name, _, _ in voices:
         cmd += ['-i', str(asset_path(path_name, root))]
-    effects = spec.get('effects', [])
+    effects = [] if music_only else spec.get('effects', [])
     if any(not effect.get('audio') for effect in effects):
         raise ValueError("Hiệu ứng âm thanh chưa được tạo theo timeline")
     for effect in effects:
         cmd += ['-i',str(asset_path(effect['audio'],root))]
-    if music:
-        cmd += ["-stream_loop", "-1", "-i", str(asset_path(music, root))]
+    for track, _, _, _ in tracks:
+        cmd += ["-stream_loop", "-1", "-i", str(asset_path(track, root))]
     graph = []
     voice_gain = spec.get("voice_volume", 1)
-    music_gain = spec.get("music_volume", .2) if spec.get("music") else (spec.get("music_volume", .2) if voice else 1)
+    music_gain = spec.get("music_volume", .2) if spec.get("music") or music_cues else (spec.get("music_volume", .2) if voice else 1)
     if voice:
         for index, (_, start, window) in enumerate(voices, 1):
             graph += [f"[{index}:a]aresample=48000,apad,atrim=duration={window},asetpts=PTS-STARTPTS,volume={voice_gain},adelay={round(start*1000)}:all=1[v{index}]"]
@@ -286,8 +294,11 @@ def encode_video(path, spec, root):
         else:
             graph += [''.join(f'[v{i}]' for i in range(1,len(voices)+1))+f'amix=inputs={len(voices)}:duration=longest:normalize=0[v]']
     if music:
-        index = len(voices)+len(effects)+1
-        graph += [f"[{index}:a]aresample=48000,atrim=duration={duration},asetpts=PTS-STARTPTS,volume={music_gain},afade=t=out:st={max(0,duration-.5)}:d=0.5[m]"]
+        for offset, (_, start, end, volume) in enumerate(tracks):
+            index = len(voices)+len(effects)+1+offset
+            window = end-start
+            graph += [f"[{index}:a]aresample=48000,atrim=duration={window},asetpts=PTS-STARTPTS,volume={music_gain*volume},afade=t=in:d={min(.02,window/2)},afade=t=out:st={max(0,window-.1)}:d={min(.1,window/2)},adelay={round(start*1000)}:all=1[m{offset}]"]
+        graph += [''.join(f'[m{i}]' for i in range(len(tracks)))+f'amix=inputs={len(tracks)}:duration=longest:normalize=0[m]']
     if voice and music:
         if spec.get("duck_music", True):
             graph += ["[v]asplit=2[vout][side]", "[m][side]sidechaincompress=threshold=0.02:ratio=8:attack=15:release=300[ducked]", "[vout][ducked]amix=inputs=2:duration=longest:normalize=0,alimiter=limit=0.95[a]"]
@@ -320,7 +331,7 @@ def encode_video(path, spec, root):
             (cue['text'], cue['start'], cue['end'], cue.get('audio')) for cue in cues]
         events, estimated = [], False
         for text, start, end, audio in captions:
-            words = load_words(asset_path(audio, root)) if audio else []
+            words = load_words(asset_path(audio, root)) if audio and not music_only else []
             cue_events = word_events(text, start, end, words)
             estimated = estimated or any(event['timing'] == 'estimated' for event in cue_events)
             events.extend(cue_events)

@@ -130,8 +130,14 @@ async def project_collection(request):
                              duration=scene.duration, fps=scene.fps, width=scene.width, height=scene.height,
                              font=scene.font, music=scene.audio)
     else:
-        draft = studio.Draft.model_validate(body.get("draft", {}))
+        from .preferences import new_draft
+        draft = new_draft(body.get("draft", {}))
     return JSONResponse(studio.create_project(draft),status_code=201)
+
+
+async def user_preferences(request):
+    from . import preferences
+    return JSONResponse(preferences.read() if request.method=='GET' else preferences.save(await request.json()))
 
 
 async def project_detail(request):
@@ -284,7 +290,7 @@ async def lifespan(app):
     yield
 
 
-routes=[Route("/api/bootstrap",bootstrap),Route("/api/library",list_library),Route("/api/projects",project_collection,methods=["GET","POST"]),
+routes=[Route("/api/preferences",user_preferences,methods=["GET","POST"]),Route("/api/bootstrap",bootstrap),Route("/api/library",list_library),Route("/api/projects",project_collection,methods=["GET","POST"]),
     Route('/api/asset-generations',asset_generations,methods=['GET','POST']),
     Route('/api/asset-generations/{pid}',asset_generation_detail),
     Route('/api/asset-generations/{pid}/files/{name}',asset_generation_artifact),

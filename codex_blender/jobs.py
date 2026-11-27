@@ -34,7 +34,7 @@ def status(job_id):
     path = job_path(job_id)
     data = json.loads((path / "status.json").read_text(encoding="utf-8"))
     data["frames_rendered"] = len(list((path / "frames").glob("frame_*.png")))
-    data["artifacts"] = {name: str(path / name) for name in ("scene.json", "scene.blend", "preview.png", "video.mp4", "render.log") if (path / name).exists()}
+    data["artifacts"] = {name: str(path / name) for name in ("scene.json", "scene.blend", "preview.png", "video.mp4", "render.log", "exported-assets.json") if (path / name).exists()}
     # Detect interrupted worker rather than presenting a stale running status forever.
     if data["state"] in {"queued", "rendering", "encoding"} and data.get("pid"):
         import psutil
@@ -78,6 +78,11 @@ def submit(spec: SceneSpec, mode="preview", asset_root=None):
     if mode not in {"preview", "video"}:
         raise ValueError("Mode must be preview or video")
     asset_root = asset_root or assets_dir()
+    if not spec.font and (spec.captions or spec.subtitles or any(
+        obj.kind == 'text' for obj in list(spec.objects)+[obj for shot in spec.shots for obj in shot.objects]
+    )):
+        from .fonts import ensure_font
+        spec.font = ensure_font(asset_root)
     validate_assets(spec, asset_root)
     blender_command()  # Fail before allocating a job if Blender is missing.
     job_id = uuid.uuid4().hex

@@ -6,6 +6,8 @@ Luồng hoạt động: **prompt/nội dung trong Codex → mô tả cảnh JSON
 
 ## Giao diện tạo video — Frame Studio
 
+Font, nhạc/âm lượng, lựa chọn voice, tỷ lệ khung hình, độ phân giải, FPS, samples và các lựa chọn tạo asset được tự lưu khi người dùng thay đổi. Mặc định video nằm trong `studio-data/preferences.json`, độc lập với từng dự án; kết quả AI và việc mở dự án cũ không ghi đè mặc định này. Trình duyệt giữ các thay đổi chưa đồng bộ để khôi phục nếu đóng trang ngay hoặc máy chủ cũ đang bận; lần kết nối máy chủ mới tiếp theo sẽ đồng bộ. Dự án mới dùng các lựa chọn đã lưu.
+
 ### Tạo asset từ ảnh
 
 Tab **Tạo asset từ ảnh** nhận 1–4 ảnh PNG/JPG của cùng một đối tượng, tên asset, mô tả bổ sung và phong cách. Codex phân tích ảnh thật; Blender dựng mô hình bằng hình học 3D, render preview rồi xuất GLB tĩnh có vật liệu vào thư viện. Có thể tải GLB/file Blender hoặc bấm **Dùng trong dự án** để ưu tiên mô hình trong video hiện tại.
@@ -26,8 +28,12 @@ Chạy `start-studio.cmd` (nhấp đúp trên Windows), rồi mở **http://127.
 
 Trong Studio:
 
-1. Tạo dự án, nhập một **prompt tổng** gồm ý tưởng, kịch bản, hành động và phong cách; có thể nhập file `.txt` hoặc bắt đầu từ cảnh mẫu. Nội dung hai ô của dự án cũ được gộp vào prompt tổng.
-2. Trong **Phong cách**, thêm tối đa 4 ảnh tham khảo, chọn chỉ dẫn mỹ thuật và GLB ưu tiên. Codex nhận ảnh thật cùng yêu cầu, tham khảo màu sắc/chất liệu/tỷ lệ; đây không phải tính năng tự chuyển ảnh thành mô hình 3D hay bảo đảm sao chép chính xác phong cách.
+Theo yêu cầu hiện tại, video xuất từ Studio chỉ phát **một track nhạc nền duy nhất** xuyên suốt. Chọn file trong tab Âm thanh hoặc để tool tổng hợp một nền nhạc đơn giản; file ngắn được lặp đến hết video. Voice, âm thanh upload khác và hiệu ứng đều bị loại khỏi bản xuất; không gọi dịch vụ TTS. Lời thoại vẫn có thể dùng làm nội dung phụ đề với mốc ước tính. Các hàm/API voice cũ được giữ lại, còn điều khiển voice trong trình dựng được ẩn.
+
+Thư viện mới **Universal Core & Interior** có 180 asset từ hai ảnh tham khảo mới, tại `assets/generated/universal-interior-v1/`. Mỗi món có GLB, BLEND chỉnh sửa được, PNG và metadata; các mesh được đặt tên riêng, gốc giữa đáy. Mở `catalog.html` hoặc tìm `universal-interior-v1` trong Thư viện assets. Bộ khối, cơ khí, nội thất và bảy diorama là các diễn giải 3D theo ảnh, tĩnh và chưa có rig nhân vật. Thư viện cũ vẫn được giữ nguyên.
+
+1. Tạo dự án, nhập một **prompt tổng** gồm nội dung, vật thể, bối cảnh và hành động; có thể nhập file `.txt`. Trong tab Prompt có thể thêm tối đa 4 ảnh tham khảo cho nội dung và bố cục.
+2. Bấm **Tạo video**: tool đọc prompt và kiểm kê toàn bộ thư viện model, chuẩn bị từng vật thể/bối cảnh trước khi viết kịch bản. Ưu tiên model hoàn chỉnh; nếu thiếu thì tự dựng bổ sung theo model và các khối Core đã có. Có thể đổi màu/vật liệu, tạo băng trong suốt, thực phẩm hỏng, tách cửa/chi thể thành phần chuyển động và tạo rig xương thật. Phần còn thiếu được tự sinh, xuất GLB, BLEND và preview vào `assets/generated/auto-prepared/` trước khi viết kịch bản; chỉ lỗi dựng/xuất thực sự mới dừng luồng. Mỗi món giữ model hoàn chỉnh, các GLB bộ phận và recipe/rig để dùng lại. Bảng **Bộ assets** hiển thị các món đang tự dựng. Tab Phong cách và lựa chọn GLB ưu tiên đã được bỏ; tool tự chọn từ thư viện cho mỗi video.
 3. Mô tả lời thoại, giọng đọc, nhạc và hiệu ứng âm thanh trong prompt tổng. Chế độ **Theo prompt** tự lấy lời đọc và các mốc của từng cảnh, tạo giọng tiếng Việt/Anh và phụ đề theo từng đoạn. Các điều khiển voice thủ công phục vụ cảnh cũ; phân cảnh mới dùng âm thanh đã biên soạn từ prompt.
 4. Tỷ lệ, độ phân giải và FPS trong prompt được ưu tiên; nếu không ghi thì dùng giá trị ở **Xuất video**. Giữ nguyên các mốc phân cảnh/lời thoại đã ghi; suy ra thời lượng khi không có mốc (tối đa 3600 giây). Nhận cả khoảng thời lượng: **90–120 giây** cùng timeline kết thúc **01:35** sẽ tạo video **95 giây**, giữ đủ các phân cảnh. Nếu chỉ có khoảng, AI chọn thời lượng trong khoảng đó. Lời đọc không bị cắt ngầm để ép vào cảnh: nếu không thể đọc kịp, ứng dụng báo rõ đoạn cần chỉnh.
 5. Bấm **Tạo video** để biên soạn toàn bộ timeline, dựng bối cảnh và chuyển động của từng cảnh, tạo âm thanh rồi render MP4. Danh sách **Phân cảnh theo prompt** cho xem mốc thời gian, hành động và lời thoại. Mỗi hành động phải gắn với đối tượng có chuyển động; chỉ di chuyển camera không đủ. Nếu prompt hoặc đầu vào dựng đã đổi, bấm xuất/preview sẽ lập kế hoạch mới thay vì dùng lại cảnh cũ.
@@ -64,7 +70,7 @@ Trước khi dựng, AI liệt kê các yếu tố hình ảnh từ prompt: bố
 - **Cài đặt → Thư mục assets cố định:** chọn bằng hộp thoại hoặc dán đường dẫn tuyệt đối tới thư mục có sẵn. Mặc định là `assets/` của workspace.
 - Upload, file TTS tạo thành công, GLB xuất từ Blender và ảnh thumbnail được lưu trong thư mục đó. Tên/mô tả/tags nằm trong file `.asset.json` bên cạnh GLB để AI tìm và chọn lại.
 - Sau khi preview hoặc render hoàn tất, bấm **Lưu asset**; đặt tên, mô tả và chọn các đối tượng cần nhóm. Tool xuất GLB tĩnh, giữ chất liệu, đưa gốc tọa độ về giữa đáy và tạo thumbnail.
-- Vào thư viện, bấm **Dùng trong dự án** để ưu tiên mô hình đó khi AI tạo cảnh mới. Catalog cũng được cung cấp cho Codex qua MCP `list_assets`.
+- Toàn bộ thư viện model được tự động xét cho mỗi prompt mới, không giới hạn ở 200 mục đầu. Kịch bản chỉ dùng bộ assets đã chuẩn bị, kể cả phần tự dựng bổ sung; các bước dựng cảnh và render kiểm tra lại đường dẫn, số lượng và rig. Catalog cũng được cung cấp cho Codex qua MCP `list_assets`. Nhân vật có các mesh rời có thể được tách theo tên bộ phận, đặt pivot và gắn skeleton với rigid weights; recipe giữ các bộ phận để điều khiển tay/chân/biểu cảm ở bước dựng cảnh.
 - Đã lưu sẵn **Nhà phát minh áo vàng** và **Tòa nhà 10 tầng cắt lớp** từ video mẫu vào `assets/generated/` trong workspace này.
 - Đổi thư mục không di chuyển hoặc xóa tài nguyên cũ. Các render đang chạy giữ nguyên thư mục đã chụp lúc bắt đầu; dự án cũ có thể cần chọn lại tài nguyên nếu thư viện đổi.
 
@@ -148,10 +154,13 @@ Ví dụ:
 - Cube, sphere, cylinder, cone, torus, plane; chữ nổi 3D; ảnh đặt trên mặt phẳng; mô hình GLB.
 - Màu sắc, chất liệu kim loại, độ nhám, ánh sáng studio và camera di chuyển.
 - Keyframe vị trí, góc xoay và tỉ lệ theo giây; một timeline cho mỗi video.
+- Rig xương Blender cho nhân vật hình khối: armature, vertex weights cứng và pose keyframes; camera perspective hoặc orthographic.
+- Tự chọn font trên máy có đủ dấu tiếng Việt; nhạc theo từng đoạn và hiệu ứng chim hót, ruồi vo ve, nước nhỏ giọt được tổng hợp theo phong cách hoạt hình.
+- Prompt yêu cầu lưu asset sẽ xuất các yếu tố geometry thành GLB trong `assets/generated/video-<job_id>/`, giữ skeleton và thêm vào thư viện. Các pose animation không được xuất; skeleton có thể chỉnh tiếp trong Blender.
 - Nhạc hoặc giọng đọc có sẵn; MP4 H.264/AAC, PNG preview và file `.blend` chỉnh sửa tiếp.
 - Job nền có trạng thái, tiến độ số frame, log lỗi; khởi động lại MCP không làm mất job đang chạy.
 
-Đây là bản đầu cho hoạt cảnh và motion graphics. Chưa sinh footage từ văn bản, diễn hoạt xương nhân vật, dựng nhiều shot/chuyển cảnh hay điều khiển trực tiếp cửa sổ Blender đang mở. Studio có lựa chọn tạo voice online riêng; Blender renderer chỉ nhận file âm thanh. Prompt và content trong JSON là metadata: chính Codex phải chuyển chúng thành objects/keyframes, renderer không tự hiểu văn bản. Render dùng máy cục bộ, thời gian phụ thuộc độ phức tạp và độ phân giải. Mỗi lần sửa/render tạo job mới để giữ lại kết quả trước.
+Studio biên soạn prompt thành nhiều shot có geometry, rig và keyframes riêng; renderer thực thi JSON đã được kiểm tra. Chưa sinh footage chân thực, tự gắn xương và skin mềm cho mesh bất kỳ, hoặc điều khiển cửa sổ Blender đang mở. Studio tạo voice riêng; Blender renderer nhận file âm thanh. Render dùng máy cục bộ, thời gian phụ thuộc độ phức tạp và độ phân giải. Mỗi lần sửa/render tạo job mới để giữ lại kết quả trước.
 
 Renderer hiện dùng Cycles trên CPU, 16 samples với denoising để chạy được cả khi máy không có ngữ cảnh đồ họa. Có thể mở `.blend` để chỉnh chất lượng hoặc dùng GPU trong Blender.
 

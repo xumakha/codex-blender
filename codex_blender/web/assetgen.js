@@ -15,7 +15,7 @@ export function initAssetGenerator({$,api,esc,icon,safe,toast,chooseFile,assetUR
   function images(){
     modeUI();
     const selected=$('assetgen-existing-image').value;
-    $('assetgen-existing-image').innerHTML='<option value="">Chọn ảnh trong thư viện…</option>'+getAssets().filter(a=>a.kind==='image').map(a=>`<option value="${esc(a.path)}">${esc(a.name)}</option>`).join('');
+    $('assetgen-existing-image').innerHTML='<option value="">Chọn ảnh trong thư viện…</option>'+getAssets().filter(a=>a.kind==='image'&&!a.internal).map(a=>`<option value="${esc(a.path)}">${esc(a.name)}</option>`).join('');
     $('assetgen-existing-image').value=selected;
     $('assetgen-references').innerHTML=G.references.map((path,i)=>`<div class="assetgen-thumb"><img src="${assetURL(path)}" alt="Ảnh tham khảo ${i+1}"><button class="icon-button" data-remove-assetgen-ref="${i}" aria-label="Bỏ ảnh ${i+1}">${icon('close')}</button></div>`).join('');
     $('assetgen-generate').disabled=active()||G.posting;

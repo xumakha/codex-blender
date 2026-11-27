@@ -116,6 +116,9 @@ def validate_assets(spec, root: Path | None = None):
     for name in (spec.voice_audio, spec.music):
         if name and asset_path(name, root).suffix.lower() not in {".wav", ".mp3", ".ogg", ".m4a"}:
             raise ValueError("Voice/music must be wav, mp3, ogg or m4a")
+    for cue in spec.music_cues:
+        if cue.audio and asset_path(cue.audio, root).suffix.lower() not in {'.wav','.mp3','.ogg','.m4a'}:
+            raise ValueError('Music cues must reference supported audio files')
     for shot in spec.shots:
         for cue in shot.narration:
             if cue.audio and asset_path(cue.audio, root).suffix.lower() not in {".wav", ".mp3", ".ogg", ".m4a"}:

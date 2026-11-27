@@ -71,7 +71,7 @@ class BridgeTests(unittest.TestCase):
 
     def test_resume_renders_missing_and_truncated_frames_only(self):
         fake_bpy=SimpleNamespace(ops=SimpleNamespace(render=SimpleNamespace(render=lambda **kw:None)))
-        with patch.dict(sys.modules,{'bpy':fake_bpy,'mathutils':SimpleNamespace(Vector=None)}):
+        with patch.dict(sys.modules,{'bpy':fake_bpy,'mathutils':SimpleNamespace(Vector=None,Matrix=None)}):
             module_spec=importlib.util.spec_from_file_location('render_resume_test','codex_blender/render_scene.py')
             renderer=importlib.util.module_from_spec(module_spec);module_spec.loader.exec_module(renderer)
         with tempfile.TemporaryDirectory() as tmp:

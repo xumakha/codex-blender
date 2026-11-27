@@ -1,6 +1,7 @@
 import {initAssetGenerator} from './assetgen.js';
 import {api} from './api.js';
 import {renderETA} from './render-eta.js';
+import {createPreferences} from './preferences.js';
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const icon = name => `<svg aria-hidden="true"><use href="#i-${name}"/></svg>`;
@@ -8,12 +9,13 @@ const assetURL = path => `/api/assets/file?path=${encodeURIComponent(path)}`;
 const jobURL = (id, name) => `/api/jobs/${id}/${name}`;
 const S = {project:null, assets:[], projects:[], voices:[], page:'studio', tab:'script', kind:'all', voiceMode:'none', poll:null, dirty:false, fileCategory:'images', fileHandler:null};
 let toastTimer;
+const preferences=createPreferences({$,api,toast,dimensions,getVoiceMode:()=>S.voiceMode});
 function toast(message, error=false) { $('toast').textContent=message; $('toast').classList.toggle('error',error); $('toast').hidden=false; clearTimeout(toastTimer); toastTimer=setTimeout(()=>$('toast').hidden=true,error?7000:3500); }
 const safe = fn => async (...args) => { try {await fn(...args);} catch(error) {toast(error.message,true);} };
 const numeric=['fps','samples','rate','voice-volume','music-volume'];
-const fields=['title','prompt','style','fps','samples','voice-id','voice-file','narration','rate','voice-volume','music','music-volume','duck-music','subtitles','font'];
+const fields=['title','prompt','fps','samples','voice-id','voice-file','narration','rate','voice-volume','music','music-volume','duck-music','subtitles','font'];
 function key(id){return id.replaceAll('-','_');}
-function markDirty(){ S.dirty=true; $('save-state').textContent='Chưa lưu'; }
+function markDirty(){ S.dirty=true; $('save-state').textContent='Chưa lưu'; renderAssetPreparation(); }
 function dimensions(){
   const aspect=$('aspect').value, res=$('resolution').value;
   if(res==='custom'&&S.project)return [S.project.draft.width,S.project.draft.height];
@@ -29,7 +31,7 @@ function readForm(){
   [draft.width,draft.height]=dimensions();
   if($('scene-json').value.trim()) draft.scene=JSON.parse($('scene-json').value); else draft.scene=null;
   draft.references=S.project.draft.references;
-  draft.selected_assets=[...document.querySelectorAll('#preferred-assets input:checked')].map(e=>e.value);
+  draft.selected_assets=[];draft.style='';
   return draft;
 }
 function setForm(project){
@@ -50,7 +52,7 @@ function setForm(project){
   if(presetW!==d.width||presetH!==d.height){let custom=[...$('resolution').options].find(o=>o.value==='custom');if(!custom){custom=new Option('Tùy chỉnh','custom');$('resolution').add(custom);}custom.textContent=`${d.width} × ${d.height} · từ cảnh`;$('resolution').value='custom';}
   $('scene-json').value=d.scene?JSON.stringify(d.scene,null,2):'';
   S.dirty=false;$('save-state').textContent='Đã lưu';
-  renderReferences();renderPreferred();updateAudio();updateMetrics();updateProjectStatus();renderRecent();
+  renderReferences();updateAudio();updateMetrics();updateProjectStatus();renderRecent();
 }
 async function saveDraft(){
   if(!S.project) return;
@@ -63,14 +65,15 @@ async function openProject(id){
   setForm(await api(`/api/projects/${id}`)); showPage('studio');
 }
 async function newProject(template){
+  await preferences.flush();
   if(S.dirty && S.project && !busy()) await saveDraft();
   const project=await api('/api/projects',{method:'POST',body:template?{template}:{}});
-  S.projects=await api('/api/projects');setForm(project);showPage('studio');showTab('script');
+  S.projects=await api('/api/projects');setForm(preferences.restore(project));showPage('studio');showTab('script');
   toast(template?'Đã nạp cảnh mẫu. Bạn có thể render ngay.':'Đã tạo dự án mới');
 }
 function busy(){ const p=S.project;return p&&(['planning','preparing_audio','exporting'].includes(p.state)||['queued','rendering','encoding','pausing','paused'].includes(p.job?.state)); }
 function renderRecent(){ $('recent-projects').innerHTML=S.projects.slice(0,8).map(p=>`<button data-project="${p.id}" class="${p.id===S.project?.id?'active':''}" title="${esc(p.title)}">${esc(p.title)}</button>`).join('')||'<p class="helper" style="padding:0 14px">Chưa có dự án</p>'; }
-function showTab(tab){ S.tab=tab;for(const node of document.querySelectorAll('[data-tab]')){const on=node.dataset.tab===tab;node.classList.toggle('active',on);node.setAttribute('aria-selected',on);}for(const t of ['script','art','audio','output'])$(`tab-${t}`).hidden=t!==tab; }
+function showTab(tab){ S.tab=tab;for(const node of document.querySelectorAll('[data-tab]')){const on=node.dataset.tab===tab;node.classList.toggle('active',on);node.setAttribute('aria-selected',on);}for(const t of ['script','audio','output'])$(`tab-${t}`).hidden=t!==tab; }
 function showPage(page){
   S.page=page;for(const p of ['studio','assetgen','library','history','settings'])$(`page-${p}`).hidden=p!==page;
   document.querySelectorAll('#nav [data-page]').forEach(n=>n.classList.toggle('active',n.dataset.page===page));
@@ -93,11 +96,12 @@ function updateMetrics(){
 }
 function setSelect(id, entries, blank){ const el=$(id),current=el.value; el.innerHTML=`<option value="">${esc(blank)}</option>`+entries.map(a=>`<option value="${esc(a.path)}">${esc(a.name)}</option>`).join('');el.value=current; }
 function populateAssetSelects(){
-  const audio=S.assets.filter(a=>a.kind==='audio');setSelect('voice-file',audio,'Chọn file giọng đọc…');setSelect('music',audio,'Không dùng nhạc nền');
+  const audio=S.assets.filter(a=>a.kind==='audio');setSelect('voice-file',audio,'Chọn file giọng đọc…');setSelect('music',audio,'Tự tạo một nhạc nền');
   setSelect('font',S.assets.filter(a=>a.kind==='font'),'Chọn font hỗ trợ tiếng Việt…');
-  setSelect('existing-reference',S.assets.filter(a=>a.kind==='image'),'Chọn ảnh trong thư viện…');
+  setSelect('existing-reference',S.assets.filter(a=>a.kind==='image'&&!a.internal),'Chọn ảnh trong thư viện…');
 }
 function updateAudio(){
+  $('duck-music').checked=false;$('duck-music').closest('label').hidden=true;
   $('voice-upload').hidden=S.voiceMode!=='upload';$('voice-tts').hidden=S.voiceMode!=='tts';
   $('voice-options').hidden=!['auto','tts'].includes(S.voiceMode);
   const voice=S.voices.find(v=>v.id===$('voice-id').value);
@@ -113,13 +117,18 @@ function renderReferences(){
   $('reference-grid').innerHTML=(S.project?.draft.references||[]).map((path,i)=>`<div class="reference"><img src="${assetURL(path)}" alt="Ảnh phong cách ${i+1}"><button class="icon-button" data-remove-ref="${i}" aria-label="Bỏ ảnh tham khảo ${i+1}">${icon('close')}</button></div>`).join('');
   $('upload-references').disabled=busy()||(S.project?.draft.references?.length||0)>=4;
 }
-function renderPreferred(){
-  const chosen=new Set(S.project?.draft.selected_assets||[]);
-  $('preferred-assets').innerHTML=S.assets.filter(a=>a.kind==='model').map(a=>`<label class="asset-pick"><input type="checkbox" value="${esc(a.path)}" ${chosen.has(a.path)?'checked':''}>${icon('cube')}<span title="${esc(a.description||a.path)}">${esc(a.name)}</span></label>`).join('')||'<div class="helper">Chưa có mô hình GLB. Tải lên hoặc lưu các đối tượng từ cảnh đã render.</div>';
+function renderAssetPreparation(){
+  const inventory=S.dirty?null:S.project?.asset_preparation;
+  $('asset-preparation-panel').hidden=!inventory;
+  if(!inventory)return;
+  const items=inventory.requirements||[];
+  $('asset-preparation-title').textContent=`Bộ assets: ${items.length} vật thể/bối cảnh · ${inventory.ready?'Đã đủ':inventory.generation_state==='generating'?'Đang tự dựng phần còn thiếu':'Đang chuẩn bị'}`;
+  const names=new Map(S.assets.map(a=>[a.path,a.name]));
+  $('prepared-assets').innerHTML=items.map(r=>{const paths=[...new Set((r.objects||[]).filter(o=>o.kind==='model').map(o=>o.asset))];return `<p><strong>${esc(r.label)} × ${r.count}</strong><br>${r.missing?`Sẽ tự dựng: ${esc(r.missing)}`:paths.map(path=>esc(names.get(path)||path)).join(' · ')}<br><small>${esc(r.reason)}</small></p>`;}).join('');
 }
 function mediaSource(element,url){if(element.dataset.source!==url){element.src=url;element.dataset.source=url;}}
 function updateProjectStatus(){
-  const p=S.project;if(!p)return;
+  const p=S.project;if(!p)return;renderAssetPreparation();
   const isBusy=busy();document.body.classList.toggle('busy',isBusy);
   for(const el of document.querySelectorAll('.editor input,.editor textarea,.editor select')) el.disabled=!!isBusy;
   for(const id of ['save-project','generate','import-script','upload-voice','upload-music','upload-font','add-reference'])$(id).disabled=!!isBusy;
@@ -131,6 +140,9 @@ function updateProjectStatus(){
   $('scene-label').textContent=shots.length?`${shots.length} phân cảnh · ${screenplay.duration} giây · Theo prompt`:activeScene?`${activeScene.objects.length} đối tượng · Cảnh đã sẵn sàng`:p.prompt_timing?.duration?`Thời lượng theo prompt: ${p.prompt_timing.duration} giây`:'Bắt đầu với ý tưởng của bạn';
   const storyboard=shots.map((shot,i)=>`<details><summary>${i+1}. ${esc(shot.title)} · ${shot.start}–${shot.end}s</summary><p>${esc(shot.setting)}</p>${shot.elements?.length?`<strong>Chi tiết cần có trong cảnh</strong><ul>${shot.elements.map(element=>`<li><strong>${esc(element.label)}</strong> · ${esc(element.appearance)}${element.parts?.length?`<p class="helper">${element.parts.map(part=>`${part.count} ${esc(part.name)}`).join(' · ')}</p>`:''}</li>`).join('')}</ul>`:''}<ul>${shot.actions.map(action=>`<li>${esc(action)}</li>`).join('')}</ul>${shot.narration.map(cue=>`<p><strong>${cue.start}–${cue.end}s:</strong> ${esc(cue.text)}</p>`).join('')}</details>`).join('');
   $('storyboard').hidden=!shots.length;
+  const warnings=screenplay?.warnings||[];
+  $('screenplay-warnings').hidden=!warnings.length;
+  $('screenplay-warnings').textContent=warnings.length?'Lưu ý khi tạo video: '+warnings.join(' '):'';
   if($('storyboard').dataset.content!==storyboard){$('storyboard').innerHTML=`<h2>Phân cảnh theo prompt</h2>${storyboard}`;$('storyboard').dataset.content=storyboard;}
   const job=p.job;
   $('retry-actions').hidden=isBusy||job?.state!=='failed';
@@ -180,30 +192,33 @@ async function poll(){
     if((wasState==='planning'&&fresh.state!=='planning')||wasState==='exporting'&&fresh.state!=='exporting'){
       setForm(fresh);await loadLibrary();if(fresh.state==='ready')toast(wasState==='exporting'?'Asset đã được lưu vào thư viện':fresh.job?.mode==='video'?'Đã dựng cảnh, đang tạo video.':'Cảnh đã sẵn sàng.');
     }else{S.project={...fresh,draft:S.dirty?S.project.draft:fresh.draft};updateMetrics();updateProjectStatus();}
-    if(fresh.job?.state==='completed'&&wasJob!=='completed')toast(fresh.job.mode==='video'?'Video đã xuất xong':'Ảnh preview đã sẵn sàng');
+    if(fresh.job?.state==='completed'&&wasJob!=='completed'){
+      await loadLibrary();
+      toast(fresh.job.mode==='video'?'Video đã xuất xong':'Ảnh preview đã sẵn sàng');
+    }
   }catch(error){console.warn('Không cập nhật được tiến độ',error.message);}
 }
 async function loadLibrary(){
   const data=await api('/api/library');S.assets=data.assets;S.settings=data.settings;
-  $('asset-count').textContent=S.assets.filter(a=>a.kind==='model').length;
+  $('asset-count').textContent=S.assets.filter(a=>a.kind==='model'&&!a.internal).length;
   $('sidebar-folder').textContent=data.settings.assets_directory;$('sidebar-folder').title=data.settings.assets_directory;
   $('library-path').textContent=data.settings.assets_directory;$('assets-directory').value=data.settings.assets_directory;
-  populateAssetSelects();renderPreferred();renderLibrary();assetGenerator.images();
+  populateAssetSelects();renderLibrary();assetGenerator.images();
 }
 function bytes(value){return value>1024*1024?`${(value/1024/1024).toFixed(1)} MB`:`${Math.max(1,Math.round(value/1024))} KB`;}
 function renderLibrary(){
   const q=$('asset-search').value.trim().toLocaleLowerCase('vi');
-  const assets=S.assets.filter(a=>(S.kind==='all'||a.kind===S.kind)&&`${a.name} ${a.description} ${a.tags.join(' ')}`.toLocaleLowerCase('vi').includes(q));
+  const assets=S.assets.filter(a=>!a.internal&&(S.kind==='all'||a.kind===S.kind)&&`${a.name} ${a.description} ${a.tags.join(' ')}`.toLocaleLowerCase('vi').includes(q));
   const names={model:'MÔ HÌNH 3D',image:'HÌNH ẢNH',audio:'ÂM THANH',font:'FONT CHỮ'};
   $('library-grid').innerHTML=assets.map(a=>{
     const picture=a.preview||(a.kind==='image'?a.path:null);
-    return `<article class="asset-card"><div class="asset-visual">${picture?`<img class="${a.kind==='model'?'model-thumb':''}" src="${assetURL(picture)}" loading="lazy" alt="${esc(a.name)}">`:icon({model:'cube',audio:'music',font:'grid',image:'image'}[a.kind])}<span class="asset-badge">${a.source==='blender'?'BLENDER ASSET':names[a.kind]}</span></div><div class="asset-details"><h3 title="${esc(a.name)}">${esc(a.name)}</h3><p>${esc(a.description||a.tags.join(' · ')||a.path)}</p>${a.kind==='audio'?`<audio controls preload="none" src="${assetURL(a.path)}"></audio>`:''}<div class="asset-footer"><small>${bytes(a.bytes)}</small>${a.kind==='model'?`<button class="text-button" data-use-asset="${esc(a.path)}">Dùng trong dự án</button>`:a.kind==='image'?`<button class="text-button" data-use-ref="${esc(a.path)}">Dùng làm tham khảo</button>`:`<a class="text-button" href="${assetURL(a.path)}" target="_blank" rel="noopener">Mở file</a>`}</div></div></article>`;
+    return `<article class="asset-card"><div class="asset-visual">${picture?`<img class="${a.kind==='model'?'model-thumb':''}" src="${assetURL(picture)}" loading="lazy" alt="${esc(a.name)}">`:icon({model:'cube',audio:'music',font:'grid',image:'image'}[a.kind])}<span class="asset-badge">${a.source==='blender'?'BLENDER ASSET':names[a.kind]}</span></div><div class="asset-details"><h3 title="${esc(a.name)}">${esc(a.name)}</h3><p>${esc(a.description||a.tags.join(' · ')||a.path)}</p>${a.kind==='audio'?`<audio controls preload="none" src="${assetURL(a.path)}"></audio>`:''}<div class="asset-footer"><small>${bytes(a.bytes)}</small>${a.kind==='model'?`<a class="text-button" href="${assetURL(a.path)}" target="_blank" rel="noopener">Mở GLB</a>`:a.kind==='image'?`<button class="text-button" data-use-ref="${esc(a.path)}">Dùng làm tham khảo</button>`:`<a class="text-button" href="${assetURL(a.path)}" target="_blank" rel="noopener">Mở file</a>`}</div></div></article>`;
   }).join('')||'<div class="empty-state">Chưa có tài nguyên phù hợp.<br>Tải file lên hoặc lưu các đối tượng từ một cảnh đã render.</div>';
 }
 async function uploadFile(file,category){
   const form=new FormData();form.append('file',file);form.append('category',category);
   toast(`Đang tải ${file.name}…`);
-  const result=await api('/api/uploads',{method:'POST',body:form});S.assets=result.assets;populateAssetSelects();renderPreferred();renderLibrary();return result.path;
+  const result=await api('/api/uploads',{method:'POST',body:form});S.assets=result.assets;populateAssetSelects();renderLibrary();return result.path;
 }
 function chooseFile(category,handler,multiple=false){
   S.fileCategory=category;S.fileHandler=handler;
@@ -240,6 +255,7 @@ $('delete-elevenlabs-key').onclick=safe(async()=>{
   showElevenlabsStatus(await api('/api/credentials/elevenlabs',{method:'DELETE'}));$('elevenlabs-api-key').value='';toast('Đã xóa key đã lưu');
 });
 async function boot(){
+  await preferences.load();
   showElevenlabsStatus(await api('/api/credentials/elevenlabs'));
   const data=await api('/api/bootstrap');Object.assign(S,{assets:data.assets,projects:data.projects,settings:data.settings,voices:data.voices});
   $('connection-dot').classList.toggle('ready',data.blender_ready);$('connection-label').textContent=data.blender_ready?'Blender sẵn sàng':'Blender chưa sẵn sàng';
@@ -250,7 +266,8 @@ async function boot(){
   $('voice-clone-notice').textContent=pendingVoices.map(v=>`${v.name}: ${v.status_message||'Giọng clone chưa sẵn sàng.'}`).join(' ');
   await loadLibrary();
   const stored=localStorage.getItem('frame-project'), found=data.projects.find(p=>p.id===stored)||data.projects[0];
-  if(found)setForm(await api(`/api/projects/${found.id}`));else setForm(await api('/api/projects',{method:'POST',body:{}}));
+  if(found)setForm(preferences.restore(await api(`/api/projects/${found.id}`)));else setForm(await api('/api/projects',{method:'POST',body:{}}));
+  preferences.restoreUI();assetGenerator.images();
   S.projects=await api('/api/projects');renderRecent();
   const page=location.hash.slice(1);if(['studio','assetgen','library','history','settings'].includes(page))showPage(page);
   S.poll=setInterval(poll,2500);
@@ -277,7 +294,7 @@ $('retry-render').onclick=safe(async()=>{
 for(const [id,mode] of [['render-preview','preview'],['render-video','video']])$(id).onclick=safe(async()=>{await saveDraft();S.project=await api(`/api/projects/${S.project.id}/render`,{method:'POST',body:{mode}});updateProjectStatus();});
 $('upload-references').onclick=()=>chooseFile('references',async path=>{await addReference(path);renderReferences();},true);
 $('add-reference').onclick=safe(()=>{if(!$('existing-reference').value)throw new Error('Chọn một ảnh trong thư viện');return addReference($('existing-reference').value);});
-for(const [id,category,select] of [['upload-voice','voices','voice-file'],['upload-music','music','music'],['upload-font','fonts','font']])$(id).onclick=()=>chooseFile(category,async path=>{$(select).value=path;markDirty();updateAudio();});
+for(const [id,category,select] of [['upload-voice','voices','voice-file'],['upload-music','music','music'],['upload-font','fonts','font']])$(id).onclick=()=>chooseFile(category,async path=>{S.project.draft[key(select)]=path;$(select).value=path;preferences.capture(select);markDirty();updateAudio();});
 $('file-input').onchange=safe(async()=>{
   const category=S.fileCategory,handler=S.fileHandler;
   try{for(const file of [...$('file-input').files]){const path=await uploadFile(file,category);if(handler)await handler(path);}toast('Đã thêm tài nguyên');$('upload-dialog').close();await loadLibrary();}
@@ -305,24 +322,20 @@ $('confirm-export').onclick=safe(async()=>{
   $('export-dialog').close();S.project=await api(`/api/projects/${S.project.id}`);updateProjectStatus();
 });
 document.addEventListener('click',safe(async event=>{
-  const el=event.target.closest('[data-page],[data-go],[data-tab],[data-project],[data-template],[data-voice],[data-style],[data-remove-ref],[data-kind],[data-use-asset],[data-use-ref],[data-import-job]');if(!el)return;
+  const el=event.target.closest('[data-page],[data-go],[data-tab],[data-project],[data-template],[data-voice],[data-remove-ref],[data-kind],[data-use-ref],[data-import-job]');if(!el)return;
   if(el.dataset.page||el.dataset.go){showPage(el.dataset.page||el.dataset.go);return;}
   if(el.dataset.tab){showTab(el.dataset.tab);return;}
   if(el.dataset.project){await openProject(el.dataset.project);localStorage.setItem('frame-project',el.dataset.project);return;}
   if(el.dataset.template){await newProject(el.dataset.template);return;}
-  if(el.dataset.voice){if(busy())return;S.voiceMode=el.dataset.voice;markDirty();updateAudio();return;}
-  if(el.dataset.style){if(busy())return;$('style').value=el.dataset.style;markDirty();return;}
+  if(el.dataset.voice){if(busy())return;S.voiceMode=el.dataset.voice;preferences.capture('voice-mode');markDirty();updateAudio();return;}
   if(el.dataset.removeRef!==undefined){if(busy())return;S.project.draft.references.splice(Number(el.dataset.removeRef),1);markDirty();renderReferences();return;}
   if(el.dataset.kind){S.kind=el.dataset.kind;document.querySelectorAll('[data-kind]').forEach(b=>b.classList.toggle('active',b===el));renderLibrary();return;}
-  if(el.dataset.useAsset){if(busy())throw new Error('Chờ dự án hoàn tất tác vụ hiện tại');const list=S.project.draft.selected_assets;if(!list.includes(el.dataset.useAsset))list.push(el.dataset.useAsset);renderPreferred();markDirty();showPage('studio');showTab('art');toast('Đã ưu tiên asset này khi AI tạo cảnh');return;}
-  if(el.dataset.useRef){await addReference(el.dataset.useRef);showPage('studio');showTab('art');return;}
+  if(el.dataset.useRef){await addReference(el.dataset.useRef);showPage('studio');showTab('script');return;}
   if(el.dataset.importJob){if(S.dirty&&!busy())await saveDraft();setForm(await api('/api/import-job',{method:'POST',body:{job_id:el.dataset.importJob}}));S.projects=await api('/api/projects');renderRecent();showPage('studio');return;}
 }));
-$('preferred-assets').addEventListener('change',()=>{S.project.draft.selected_assets=[...$('preferred-assets').querySelectorAll('input:checked')].map(e=>e.value);markDirty();});
 window.addEventListener('beforeunload',event=>{if(S.dirty){event.preventDefault();event.returnValue='';}});
 const assetGenerator=initAssetGenerator({$,api,esc,icon,safe,toast,chooseFile,assetURL,loadLibrary,getAssets:()=>S.assets,useAsset:async path=>{
   if(busy())throw new Error('Chờ dự án hiện tại hoàn tất tác vụ');
-  if(!S.project.draft.selected_assets.includes(path))S.project.draft.selected_assets.push(path);
-  renderPreferred();markDirty();showPage('studio');showTab('art');toast('Đã thêm asset vào dự án');
+  showPage('studio');showTab('script');toast('Asset đã có trong thư viện. AI sẽ dùng khi phù hợp với prompt.');
 }});
 boot().catch(error=>{$('connection-label').textContent='Không kết nối được máy chủ';toast(error.message,true);});

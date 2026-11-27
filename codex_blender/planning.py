@@ -4,12 +4,12 @@ import json
 import re
 from .geometry import expand_objects, descendants, recipe_instances
 
-DIRECTOR_REVISION = 5
+DIRECTOR_REVISION = 8
 
 
 def signature(draft):
     values = {key: getattr(draft, key) for key in (
-        "prompt", "style", "references", "selected_assets", "fps", "width", "height",
+        "prompt", "references", "fps", "width", "height",
         "voice_mode", "voice_id", "narration", "rate", "music", "font", "subtitles")}
     values['_director_revision'] = DIRECTOR_REVISION
     return hashlib.sha256(json.dumps(values, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
@@ -111,6 +111,9 @@ def check_elements(brief, design):
         if not references <= names:
             raise ValueError(f'{element.label}: mô hình tham chiếu đối tượng không tồn tại')
         element_objects[identifier] = descendants(templates,binding.objects)
+        if element.rigged and not any(rig.root in element_objects[identifier]
+                and any(bone.objects for bone in rig.bones) for rig in design.rigs):
+            raise ValueError(f'{element.label}: cần rig xương thật với geometry gắn vào bone')
         instances = recipe_instances(templates,binding.objects)
         if element.construction=='geometry' and any(obj['kind'] in ('image','model') for obj in expanded if obj['name'].split('__R',1)[0] in element_objects[identifier]):
             raise ValueError(f'{element.label}: phải dựng bằng hình khối Blender; không dùng ảnh hoặc mô hình đóng cứng thay thế')
@@ -137,16 +140,25 @@ def check_elements(brief, design):
             raise ValueError(f'Cảnh {brief.title}: không thể chuyển động đối tượng khác thay cho chủ thể của hành động')
 
 
-def check_inventory(plan, prompt):
+def check_inventory(plan, prompt, library_only=False):
     normalize = lambda value: ' '.join(value.casefold().split())
     original = normalize(prompt)
+    reuse_pattern = (
+        r'(?:ưu tiên|sử dụng lại|tái sử dụng|dùng lại|reuse|use existing)[^\n.]{0,160}(?:assets?|thư viện|models?)'
+        r'|(?:assets?|mô hình)[^\n.]{0,100}(?:có sẵn|trong thư viện|đã có|existing)')
+    reuse_allowed = any(re.search(reuse_pattern,line,re.I) and not re.search(
+        r'\b(không|never|without|do not|don.t)\b',line,re.I) for line in prompt.splitlines())
+    rig_required = any(re.search(r'rig xương|skeletal rig|armature|skeleton rig',line,re.I)
+        and not re.search(r'\b(không|without|no)\b',line,re.I) for line in prompt.splitlines())
     for shot in plan.shots:
         if not shot.elements:
             raise ValueError(f'Cảnh {shot.title}: cần liệt kê đầy đủ bối cảnh, nhân vật và đạo cụ từ prompt')
         for element in shot.elements:
+            if rig_required and element.role == 'character' and element.construction == 'geometry':
+                element.rigged = True
             if normalize(element.source) not in original:
                 raise ValueError(f'{element.label}: source phải trích nguyên văn chi tiết trong prompt')
-            if element.construction=='asset' and not re.search(r'\.glb\b|mô hình có sẵn|asset|reuse|existing model|uploaded model',element.source,re.I):
+            if element.construction=='asset' and not library_only and not reuse_allowed and not re.search(r'\.glb\b|mô hình có sẵn|asset|reuse|existing model|uploaded model',element.source,re.I):
                 raise ValueError(f'{element.label}: prompt không yêu cầu dùng asset; hãy dựng hình khối Blender')
             if element.role=='character' and element.construction=='geometry' and not element.parts:
                 raise ValueError(f'{element.label}: cần tách các bộ phận để dựng nhân vật bằng hình khối')
@@ -192,7 +204,22 @@ def check_animation(brief, design):
             raise ValueError(f"Cảnh {brief.title}: mốc hành động không hợp lệ")
         if any(name not in objects for name in binding.objects):
             raise ValueError(f"Cảnh {brief.title}: hành động tham chiếu đối tượng không tồn tại")
-        if not any(moves_during(objects[name], binding.start, binding.end) for name in binding.objects):
+        animated = any(moves_during(objects[name], binding.start, binding.end) for name in binding.objects)
+        for rig in design.rigs:
+            bones = {bone.name:bone for bone in rig.bones}
+            for bone in rig.bones:
+                if not set(bone.objects).intersection(binding.objects):
+                    continue
+                chain = [bone]
+                while chain[-1].parent is not None:
+                    chain.append(bones[chain[-1].parent])
+                for joint in chain:
+                    previous, time = joint.rotation, 0
+                    for key in sorted(joint.keyframes, key=lambda key:key.time):
+                        if key.rotation != previous and key.time > time and key.time > binding.start and time < binding.end:
+                            animated = True
+                        previous, time = key.rotation, key.time
+        if not animated:
             raise ValueError(f"Cảnh {brief.title}: hành động chưa có chuyển động đối tượng thực sự")
         covered.add(binding.action_index)
     if covered != set(range(len(brief.actions))):

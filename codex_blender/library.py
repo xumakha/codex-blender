@@ -48,7 +48,15 @@ def catalog(root=None):
                        "kind": KINDS[p.suffix.lower()], "bytes": p.stat().st_size,
                        "source": meta.get("source", "imported"), "description": meta.get("description", ""),
                        "tags": meta.get("tags", []), "preview": meta.get("preview"),
+                       "component_of": meta.get("component_of"),
                        "modified": p.stat().st_mtime})
+    # Components remain addressable by the renderer/planner, but belong to one
+    # library card. Shared assembly previews are thumbnails, not uploaded images.
+    paths={item['path'] for item in result}
+    previews={item['preview'] for item in result if item.get('preview')}
+    for item in result:
+        item['internal']=bool(item.get('component_of') in paths or
+                              (item['kind']=='image' and item['path'] in previews))
     return result
 
 

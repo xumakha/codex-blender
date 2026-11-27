@@ -1,6 +1,7 @@
 """Executed by Blender (or optional bpy wheel), not imported by the MCP server."""
 import json
 import math
+import fnmatch
 from pathlib import Path
 import sys
 import time
@@ -10,9 +11,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from geometry import expand_objects
 from pause_control import checkpoint
 from render_timing import record_frame
+from rigging import build_rigs
 
 import bpy
-from mathutils import Vector
+from mathutils import Vector, Matrix
 
 
 def complete_png(path):
@@ -160,11 +162,34 @@ def add_object(data, assets, font):
         before = set(bpy.context.scene.objects)
         bpy.ops.import_scene.gltf(filepath=str(assets / data["asset"]))
         imported = set(bpy.context.scene.objects) - before
+        bpy.context.view_layer.update()
+        selectors=data.get('asset_nodes',[])
+        if selectors:
+            chosen=[child for child in imported if child.type=='MESH' and any(
+                fnmatch.fnmatchcase(child.name.casefold(),pattern.casefold()) or pattern.casefold() in child.name.casefold()
+                for pattern in selectors)]
+            if not chosen:raise ValueError('No mesh matches asset_nodes for '+data['name'])
+            pivot=Matrix.Translation(-Vector(data.get('asset_pivot',(0,0,0))))
+            for child in chosen:
+                world=child.matrix_world.copy();child.parent=None;child.matrix_world=pivot@world
+                # Extracted parts will receive their own rig; do not keep a dangling source armature.
+                for modifier in list(child.modifiers):
+                    if modifier.type=='ARMATURE':child.modifiers.remove(modifier)
+                child.vertex_groups.clear()
+            for child in imported-set(chosen):bpy.data.objects.remove(child,do_unlink=True)
+            imported=set(chosen)
         obj = bpy.data.objects.new(data["name"], None)
         bpy.context.collection.objects.link(obj)
         for child in imported:
             if child.parent is None:
                 child.parent = obj
+        if data.get('recolor') is not None:
+            mat=material(data['name']+' variant',data['recolor'],data['metallic'],data['roughness'])
+            shader=mat.node_tree.nodes.get('Principled BSDF')
+            shader.inputs['Transmission Weight'].default_value=data.get('transmission',0)
+            shader.inputs['IOR'].default_value=1.33 if data.get('transmission',0) else 1.45
+            for child in imported:
+                if child.type=='MESH':child.data.materials.clear();child.data.materials.append(mat)
         transform(obj, data)
         return obj
     ops[kind]()
@@ -189,6 +214,10 @@ def add_object(data, assets, font):
         # Plane base shape is square; preserve image aspect before user scaling.
         obj.scale.x *= image.size[0] / max(1, image.size[1])
     obj.data.materials.append(mat)
+    shader=mat.node_tree.nodes.get('Principled BSDF')
+    shader.inputs['Transmission Weight'].default_value=data.get('transmission',0)
+    if data.get('bevel',0) and obj.type=='MESH':
+        modifier=obj.modifiers.new('Rounded reference edges','BEVEL');modifier.width=data['bevel'];modifier.segments=3
     if kind in {"sphere", "cylinder", "cone", "torus"}:
         for polygon in obj.data.polygons:
             polygon.use_smooth = True
@@ -232,6 +261,7 @@ def build_scene(spec, assets, name, count):
         animate(obj, data, spec["fps"], scene.frame_end)
     animate_visibility(spec["objects"], authored, spec["fps"], scene.frame_end)
     animate_opacity(spec["objects"], authored, spec["fps"], scene.frame_end)
+    build_rigs(spec.get('rigs', []), authored, spec['fps'], scene.frame_end)
     if spec.get("ground", True):
         bpy.ops.mesh.primitive_plane_add(size=200)
         floor = bpy.context.object
@@ -248,11 +278,19 @@ def build_scene(spec, assets, name, count):
     bpy.ops.object.camera_add(location=cam_data["location"])
     camera = bpy.context.object
     camera.data.lens = cam_data["lens"]
+    camera.data.type = 'ORTHO' if cam_data.get('projection') == 'orthographic' else 'PERSP'
+    camera.data.ortho_scale = cam_data.get('ortho_scale', 10)
     track(camera, cam_data["target"])
     scene.camera = camera
+    scene.frame_set(1)
+    if spec.get('export_assets'):
+        from library_export import export_elements
+        exports = export_elements(scene, spec, authored, Path(spec['_output']), assets, spec['_export_seen'])
+        spec['_exports'].extend(exports)
     camera.keyframe_insert(data_path="location", frame=1)
     camera.keyframe_insert(data_path="rotation_euler", frame=1)
     camera.data.keyframe_insert(data_path="lens", frame=1)
+    camera.data.keyframe_insert(data_path='ortho_scale', frame=1)
     if cam_data["end_location"]:
         camera.keyframe_insert(data_path="location", frame=1)
         camera.keyframe_insert(data_path="rotation_euler", frame=1)
@@ -264,10 +302,13 @@ def build_scene(spec, assets, name, count):
         camera.location = key["location"]
         track(camera, key["target"])
         camera.data.lens = key["lens"]
+        if key.get('ortho_scale') is not None:
+            camera.data.ortho_scale = key['ortho_scale']
         frame = min(scene.frame_end, 1+round(key["time"]*spec["fps"]))
         camera.keyframe_insert(data_path="location", frame=frame)
         camera.keyframe_insert(data_path="rotation_euler", frame=frame)
         camera.data.keyframe_insert(data_path="lens", frame=frame)
+        camera.data.keyframe_insert(data_path='ortho_scale', frame=frame)
     return scene
 
 
@@ -280,6 +321,8 @@ def run(spec_path, assets_path, mode):
     frames.mkdir(exist_ok=True)
     (output / 'render-timing.json').unlink(missing_ok=True)
     scenes = []
+    exported, seen = [], set()
+    spec.update(_output=str(output), _exports=exported, _export_seen=seen)
     if spec.get("shots"):
         for index, shot in enumerate(spec["shots"]):
             prefix = f"S{index+1:02d}_"
@@ -287,11 +330,18 @@ def run(spec_path, assets_path, mode):
             start, end = round(shot["start"]*spec["fps"]), round(shot["end"]*spec["fps"])
             if end <= start:
                 raise ValueError("A shot must contain at least one output frame")
-            local = {**spec, **shot, "objects": objects, "duration": shot["end"]-shot["start"]}
+            rigs = [{**rig, 'name':prefix+rig['name'], 'root':prefix+rig['root'],
+                     'bones':[{**bone, 'objects':[prefix+name for name in bone['objects']]} for bone in rig['bones']]}
+                    for rig in shot.get('rigs', [])]
+            elements = [{**binding, 'objects':[prefix+name for name in binding['objects']]}
+                        for binding in shot.get('element_bindings', [])]
+            local = {**spec, **shot, "objects": objects, 'rigs':rigs, 'element_bindings':elements, "duration": shot["end"]-shot["start"]}
             scenes.append((build_scene(local, assets, prefix+shot["title"], end-start), start))
     else:
         scenes.append((build_scene({**spec,'objects':expand_objects(spec['objects'])}, assets, spec["title"], max(1,round(spec["duration"]*spec["fps"]))), 0))
     first = scenes[0][0]
+    if spec.get('export_assets'):
+        (output/'exported-assets.json').write_text(json.dumps(exported, ensure_ascii=False, indent=2), encoding='utf-8')
     bpy.context.window.scene = first
     first.frame_set(1)
     first.render.filepath = str(output / "preview.png")

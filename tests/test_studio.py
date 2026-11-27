@@ -2,6 +2,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import struct
 import unittest
 from unittest.mock import patch
 from starlette.testclient import TestClient
@@ -115,17 +116,24 @@ class StudioTests(unittest.TestCase):
         response=self.client.post('/api/uploads',data={'category':'models'},files={'file':('malicious.blend',b'bad')})
         self.assertEqual(response.status_code,400)
 
-    def test_style_references_reach_codex_and_scene_is_persisted(self):
+    def test_references_reach_asset_preparation_then_screenplay_and_scene(self):
+        document=json.dumps({'asset':{'version':'2.0'},'meshes':[{'primitives':[]}]}).encode()
+        document+=b' '*((-len(document))%4)
+        (self.assets/'box.glb').write_bytes(struct.pack('<4sIII4s',b'glTF',2,20+len(document),len(document),b'JSON')+document)
         image=self.assets/'reference.png';image.write_bytes(b'image')
         p=studio.create_project(studio.Draft(prompt='Hộp xanh',references=['reference.png'],voice_id=audio.ELEVENLABS_VOICE_ID))
-        captured={}
+        captured={};stages=[]
         def fake_run(cmd,**kwargs):
             captured['cmd']=cmd;captured['task']=kwargs['input']
             output=Path(cmd[cmd.index('-o')+1])
-            if output.name.startswith('screenplay-'):
-                value=VideoPlan(title='Box',duration=12,style='Studio',shots=[{'title':'Rotate','start':0,'end':12,'setting':'Studio','actions':['Rotate the box'],'elements':[{'id':'box','label':'Box','source':'Hộp xanh','role':'prop','appearance':'Blue box'}]}])
+            stages.append(output.name.split('-')[0])
+            if output.name.startswith('assets-'):
+                from codex_blender.asset_preparation import AssetPreparation
+                value=AssetPreparation(requirements=[{'id':'box','label':'Box','source':'Hộp xanh','role':'prop','reason':'Matching blue box','objects':[{'name':'box','kind':'model','asset':'box.glb','location':[0,0,0]}]}])
+            elif output.name.startswith('screenplay-'):
+                value=VideoPlan(title='Box',duration=12,style='Library',shots=[{'title':'Rotate','start':0,'end':12,'setting':'Studio','actions':['Rotate the box'],'elements':[{'id':'box','label':'Box','source':'Hộp xanh','role':'prop','appearance':'Blue box','construction':'asset','requirement_id':'box','asset_paths':['box.glb']}]}])
             else:
-                value=ShotDesign(objects=[{'name':'box','kind':'cube','keyframes':[{'time':12,'rotation':[0,0,90]}]}],bindings=[{'action_index':0,'objects':['box'],'elements':['box'],'start':0,'end':12}],element_bindings=[{'element_id':'box','objects':['box']}])
+                value=ShotDesign(ground=False,objects=[{'name':'box','kind':'model','asset':'box.glb','keyframes':[{'time':12,'rotation':[0,0,90]}]}],bindings=[{'action_index':0,'objects':['box'],'elements':['box'],'start':0,'end':12}],element_bindings=[{'element_id':'box','objects':['box']}])
             output.write_text(value.model_dump_json(),encoding='utf-8')
             class Result:returncode=0
             return Result()
@@ -134,6 +142,8 @@ class StudioTests(unittest.TestCase):
             render.assert_called_once_with(p['id'],'video')
         saved=studio.read_project(p['id'])
         self.assertEqual(saved['state'],'ready',saved.get('error'))
+        self.assertEqual(stages,['assets','screenplay','shot'])
+        self.assertTrue(saved['asset_preparation']['ready'])
         self.assertIn(str(image),captured['cmd'])
         self.assertIn('art-direction references',captured['task'])
         self.assertEqual(saved['draft']['scene']['shots'][0]['objects'][0]['name'],'box')
@@ -203,7 +213,8 @@ class StudioTests(unittest.TestCase):
         draft=studio.Draft(scene=scene,duration=10,voice_mode='upload',voice_file='voice.wav',music='music.wav',voice_volume=.8,music_volume=.15)
         result=studio.scene_for_render(draft)
         self.assertEqual(result.objects[0].keyframes[0].time,10)
-        self.assertEqual(result.voice_audio,'voice.wav')
+        self.assertIsNone(result.voice_audio)
+        self.assertEqual(result.audio_mode,'music_only')
         self.assertEqual(result.music,'music.wav')
         self.assertEqual(result.music_volume,.15)
 
@@ -211,7 +222,9 @@ class StudioTests(unittest.TestCase):
         p=studio.create_project(studio.Draft(prompt='Keep this prompt'))
         studio.save_project(p['id'],current_job='a'*32,jobs=['a'*32])
         failed={'id':'a'*32,'state':'failed','mode':'video'}
-        with patch.object(studio,'status',return_value=failed),patch.object(studio,'retry') as retry:
+        saved_job=self.root/'retry-job';saved_job.mkdir()
+        (saved_job/'scene.json').write_text(SceneSpec(ground=False,objects=[{'name':'group','kind':'empty'}]).model_dump_json(),encoding='utf-8')
+        with patch.object(studio,'status',return_value=failed),patch.object(studio,'retry') as retry,patch.object(studio,'job_path',return_value=saved_job):
             response=self.client.post('/api/projects/'+p['id']+'/retry',json={})
         self.assertEqual(response.status_code,200,response.text)
         retry.assert_called_once_with('a'*32)

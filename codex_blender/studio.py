@@ -25,7 +25,7 @@ class Draft(Model):
     title: str = Field(default="Video mới", max_length=200)
     prompt: str = Field(default="", max_length=70002)
     script: str = Field(default="", max_length=50000)
-    style: str = Field(default="Hoạt hình 3D studio, hình khối rõ ràng, ánh sáng mềm", max_length=3000)
+    style: str = Field(default="", max_length=3000)  # Legacy drafts; current planner derives style from the library.
     references: list[str] = Field(default_factory=list, max_length=4)
     selected_assets: list[str] = Field(default_factory=list, max_length=40)
     duration: float = Field(default=5, ge=.1, le=MAX_DURATION)
@@ -75,6 +75,8 @@ def read_project(pid):
     data['prompt_timing'] = {key: contract[key] for key in ('duration', 'duration_range', 'intervals')}
     if data.get('screenplay_signature') != signature(draft):
         data['screenplay'] = None
+    if data.get('asset_preparation',{} ) and data['asset_preparation'].get('source_signature') != signature(draft):
+        data['asset_preparation'] = None
     current = data.get("current_job")
     if current:
         data["job"] = status(current)
@@ -187,23 +189,26 @@ def scene_for_render(draft):
     if not draft.scene:
         raise ValueError("Hãy tạo cảnh bằng AI hoặc nạp cảnh mẫu trước")
     scene = draft.scene.model_copy(deep=True)
+    from .sounddesign import background_only
     if scene.shots:
         # The compiled screenplay owns its timing, composition and audio.
         scene.samples = draft.samples
-        return scene
+        return background_only(scene, draft.music, draft.music_volume)
     factor = draft.duration / scene.duration
     for obj in scene.objects:
         for key in obj.keyframes:
             key.time = min(draft.duration, round(key.time * factor, 5))
+    for rig in scene.rigs:
+        for bone in rig.bones:
+            for key in bone.keyframes:
+                key.time = min(draft.duration, round(key.time * factor, 5))
     scene.title, scene.duration, scene.fps = draft.title, draft.duration, draft.fps
     scene.width, scene.height, scene.samples = draft.width, draft.height, draft.samples
     scene.voice_audio = draft.voice_file if draft.voice_mode == "upload" else None
-    if draft.voice_mode == "upload" and not draft.voice_file:
-        raise ValueError("Chọn file voice đã tải lên")
     scene.audio, scene.music, scene.music_volume = None, draft.music, draft.music_volume
     scene.voice_volume, scene.duck_music = draft.voice_volume, draft.duck_music
     scene.subtitles, scene.font = draft.subtitles, draft.font or scene.font
-    return SceneSpec.model_validate(scene.model_dump())
+    return background_only(SceneSpec.model_validate(scene.model_dump()), draft.music, draft.music_volume)
 
 
 def render_project(pid, mode):
@@ -211,12 +216,16 @@ def render_project(pid, mode):
         project = read_project(pid)
         ensure_idle(project)
         draft = Draft.model_validate(project["draft"])
-        if draft.prompt.strip() and draft.source_signature != signature(draft):
+        from .asset_preparation import POLICY_VERSION, check_scene_assets
+        preparation=project.get('asset_preparation')
+        prepared=bool(preparation and preparation.get('ready') and preparation.get('policy')==POLICY_VERSION)
+        if draft.prompt.strip() and (draft.source_signature != signature(draft) or not prepared):
             return start_plan(pid, auto_render=True, render_mode=mode)
         scene = scene_for_render(draft)
         root = assets_dir()
-        timed_voice = any(shot.narration for shot in scene.shots)
-        sound_design = scene.effects or scene.music_style != 'none'
+        check_scene_assets(scene,root,preparation)
+        timed_voice = scene.audio_mode != 'music_only' and any(shot.narration for shot in scene.shots)
+        sound_design = scene.effects or scene.music_cues or scene.music_style != 'none'
         if mode == "video" and (timed_voice or sound_design or draft.voice_mode == "tts"):
             if not timed_voice and not sound_design and not draft.narration.strip():
                 raise ValueError("Nhập lời thuyết minh để tạo voice AI")
@@ -234,9 +243,11 @@ def prepare_and_render(pid, draft, scene, root, mode):
     try:
         from .sounddesign import prepare_sound
         prepare_sound(scene, root)
-        if scene.shots:
+        if scene.audio_mode == 'music_only':
+            pass
+        elif scene.shots:
             asyncio.run(synthesize_cues(scene, root))
-        else:
+        elif draft.voice_mode == 'tts':
             folder = root / "voices"
             folder.mkdir(exist_ok=True)
             path = folder / f"tts-{uuid.uuid4().hex}.mp3"
@@ -264,6 +275,9 @@ def retry_render(pid):
         ensure_idle(project)
         if not project.get("current_job"):
             raise ValueError("Dự án chưa có job render để tiếp tục")
+        from .asset_preparation import check_scene_assets
+        previous=SceneSpec.model_validate_json((job_path(project['current_job'])/'scene.json').read_text(encoding='utf-8'))
+        check_scene_assets(previous,assets_dir())
         retry(project["current_job"])
         save_project(pid, state="ready", error=None)
     return read_project(pid)
