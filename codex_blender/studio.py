@@ -9,11 +9,13 @@ import shutil
 import subprocess
 import threading
 import uuid
+from typing import Literal
 
+import psutil
 from pydantic import Field, model_validator
 from .models import Model, SceneSpec, MAX_DURATION
 from .planning import signature, object_names, prompt_contract
-from .config import ROOT, DATA, OUTPUTS, assets_dir, asset_path, validate_assets, blender_command
+from .config import ROOT, DATA, OUTPUTS, assets_dir, asset_path, validate_assets, blender_command, ModelAssetError
 from .jobs import write_json, submit, status, job_path, retry, control
 from .library import catalog
 
@@ -25,9 +27,16 @@ class Draft(Model):
     title: str = Field(default="Video mới", max_length=200)
     prompt: str = Field(default="", max_length=70002)
     script: str = Field(default="", max_length=50000)
-    style: str = Field(default="", max_length=3000)  # Legacy drafts; current planner derives style from the library.
+    style: str = Field(default="", max_length=3000)
     references: list[str] = Field(default_factory=list, max_length=4)
     selected_assets: list[str] = Field(default_factory=list, max_length=40)
+    asset_generation_mode: Literal['auto', 'full_ai', 'library_first'] = 'auto'
+    cache_reusable_assets: bool = True
+    auto_repair: bool = True
+    max_repair_attempts: int = Field(default=3, ge=0)
+    allow_custom_geometry: Literal[True] = True
+    require_registered_assets: Literal[False] = False
+    require_reference_images: Literal[False] = False
     duration: float = Field(default=5, ge=.1, le=MAX_DURATION)
     fps: int = Field(default=24, ge=1, le=60)
     width: int = Field(default=540, ge=64, le=3840, multiple_of=2)
@@ -70,7 +79,20 @@ def read_project(pid):
     with LOCK:
         data = json.loads((project_path(pid) / "project.json").read_text(encoding="utf-8"))
     draft = Draft.model_validate(data['draft'])
+    data['draft'] = draft.model_dump(mode='json')
     data['scene_current'] = not draft.prompt.strip() or draft.source_signature == signature(draft)
+    owner = data.get('planning_owner')
+    if data.get('state') == 'planning' and owner:
+        try:
+            process = psutil.Process(owner['pid'])
+            active = process.is_running() and abs(process.create_time() - owner['created']) < 1
+        except psutil.NoSuchProcess:
+            active = False
+        except psutil.AccessDenied:
+            active = True
+        if not active:
+            data.update(state='error', error='Luồng dựng cảnh đã bị gián đoạn. Có thể tiếp tục từ checkpoint.',
+                        failed_plan=owner['request'])
     contract = prompt_contract(draft.prompt)
     data['prompt_timing'] = {key: contract[key] for key in ('duration', 'duration_range', 'intervals')}
     if data.get('screenplay_signature') != signature(draft):
@@ -80,7 +102,7 @@ def read_project(pid):
     current = data.get("current_job")
     if current:
         data["job"] = status(current)
-        if data["job"]["state"] == "failed":
+        if data["job"]["state"] == "failed" and not data.get('error'):
             data["error"] = data["job"].get("error", "Render thất bại")
     return data
 
@@ -170,7 +192,8 @@ def plan_scene(pid, draft, root, auto_render=False, render_mode="video"):
     try:
         plan_project(pid, draft, root, auto_render, render_mode)
     except Exception as exc:
-        save_project(pid, state="error", error=str(exc), planning_detail=None)
+        save_project(pid, state="error", error=str(exc), planning_detail=None,
+                     failed_plan={'signature': signature(draft), 'auto_render': auto_render, 'mode': render_mode})
 
 
 def start_plan(pid, auto_render=False, render_mode="video"):
@@ -180,7 +203,9 @@ def start_plan(pid, auto_render=False, render_mode="video"):
         draft = Draft.model_validate(project["draft"])
         if not (draft.prompt.strip() or draft.script.strip()):
             raise ValueError("Nhập prompt mô tả video trước khi tạo")
-        save_project(pid, state="planning", error=None)
+        request = {'signature': signature(draft), 'auto_render': auto_render, 'mode': render_mode}
+        owner = {'pid': os.getpid(), 'created': psutil.Process().create_time(), 'request': request}
+        save_project(pid, state="planning", error=None, failed_plan=None, planning_owner=owner)
         POOL.submit(plan_scene, pid, draft, assets_dir(), auto_render, render_mode)
     return read_project(pid)
 
@@ -189,6 +214,7 @@ def scene_for_render(draft):
     if not draft.scene:
         raise ValueError("Hãy tạo cảnh bằng AI hoặc nạp cảnh mẫu trước")
     scene = draft.scene.model_copy(deep=True)
+    scene.cache_reusable_assets = draft.cache_reusable_assets and bool(draft.prompt.strip())
     from .sounddesign import background_only
     if scene.shots:
         # The compiled screenplay owns its timing, composition and audio.
@@ -216,14 +242,16 @@ def render_project(pid, mode):
         project = read_project(pid)
         ensure_idle(project)
         draft = Draft.model_validate(project["draft"])
-        from .asset_preparation import POLICY_VERSION, check_scene_assets
-        preparation=project.get('asset_preparation')
-        prepared=bool(preparation and preparation.get('ready') and preparation.get('policy')==POLICY_VERSION)
-        if draft.prompt.strip() and (draft.source_signature != signature(draft) or not prepared):
+        if draft.prompt.strip() and (not draft.scene or draft.source_signature != signature(draft)):
             return start_plan(pid, auto_render=True, render_mode=mode)
         scene = scene_for_render(draft)
         root = assets_dir()
-        check_scene_assets(scene,root,preparation)
+        try:
+            validate_assets(scene, root)
+        except ModelAssetError:
+            if not draft.prompt.strip() or not draft.scene.shots:
+                raise
+            return start_plan(pid, auto_render=True, render_mode=mode)
         timed_voice = scene.audio_mode != 'music_only' and any(shot.narration for shot in scene.shots)
         sound_design = scene.effects or scene.music_cues or scene.music_style != 'none'
         if mode == "video" and (timed_voice or sound_design or draft.voice_mode == "tts"):
@@ -273,12 +301,18 @@ def retry_render(pid):
     with LOCK:
         project = read_project(pid)
         ensure_idle(project)
+        if failed := project.get('failed_plan'):
+            return start_plan(pid, auto_render=failed['auto_render'], render_mode=failed['mode'])
+        if project['state'] == 'error' and not project['scene_current']:
+            return start_plan(pid, auto_render=True)
         if not project.get("current_job"):
             raise ValueError("Dự án chưa có job render để tiếp tục")
-        from .asset_preparation import check_scene_assets
-        previous=SceneSpec.model_validate_json((job_path(project['current_job'])/'scene.json').read_text(encoding='utf-8'))
-        check_scene_assets(previous,assets_dir())
-        retry(project["current_job"])
+        try:
+            retry(project["current_job"])
+        except ModelAssetError:
+            if not project['draft']['prompt'].strip():
+                raise
+            return start_plan(pid, auto_render=True, render_mode=project['job']['mode'])
         save_project(pid, state="ready", error=None)
     return read_project(pid)
 

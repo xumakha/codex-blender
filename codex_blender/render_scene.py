@@ -8,24 +8,15 @@ import time
 
 # Blender also executes this file directly, outside the installed app's Python environment.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from geometry import expand_objects
+from geometry import expand_objects, descendants
+from mesh_program import build_mesh, validate_mesh
 from pause_control import checkpoint
+from render_artifacts import complete_png, complete_blend
 from render_timing import record_frame
 from rigging import build_rigs
 
 import bpy
 from mathutils import Vector, Matrix
-
-
-def complete_png(path):
-    try:
-        with path.open("rb") as image:
-            if image.read(8) != b"\x89PNG\r\n\x1a\n":
-                return False
-            image.seek(-12, 2)
-            return image.read() == b"\x00\x00\x00\x00IEND\xaeB`\x82"
-    except (OSError, ValueError):
-        return False
 
 
 def render_frames(scene, frames, offset=0):
@@ -147,7 +138,7 @@ def animate_opacity(data, authored, fps, last):
                     shader.inputs['Alpha'].keyframe_insert(data_path='default_value',frame=min(last,1+round(time*fps)))
 
 
-def add_object(data, assets, font):
+def add_object(data, assets, font, mesh_cache=None):
     kind = data["kind"]
     if kind == 'empty':
         obj = bpy.data.objects.new(data['name'], None)
@@ -192,8 +183,61 @@ def add_object(data, assets, font):
                 if child.type=='MESH':child.data.materials.clear();child.data.materials.append(mat)
         transform(obj, data)
         return obj
-    ops[kind]()
-    obj = bpy.context.object
+    if kind == 'mesh':
+        geometry = data['mesh']
+        if geometry.get('program') is not None:
+            program = geometry['program']
+            if mesh_cache is None:
+                mesh_cache = {}
+            if program not in mesh_cache:
+                mesh_cache[program] = build_mesh(program)
+            vertices, faces = mesh_cache[program]
+        else:
+            vertices, faces = validate_mesh(geometry['vertices'], geometry['faces'])
+        mesh = bpy.data.meshes.new(data['name'])
+        mesh.from_pydata(vertices, [], faces)
+        if mesh.validate() or not any(poly.area > 1e-10 for poly in mesh.polygons):
+            raise ValueError(f"{data['name']}: invalid or degenerate mesh")
+        obj = bpy.data.objects.new(data['name'], mesh)
+        bpy.context.collection.objects.link(obj)
+        for polygon in mesh.polygons:
+            polygon.use_smooth = geometry['smooth']
+        if geometry.get('mirror_x'):
+            obj.modifiers.new('Mirror X', 'MIRROR')
+        if geometry['subdivision']:
+            modifier = obj.modifiers.new('Subdivision', 'SUBSURF')
+            modifier.levels = modifier.render_levels = geometry['subdivision']
+        if geometry['solidify']:
+            modifier = obj.modifiers.new('Thickness', 'SOLIDIFY')
+            modifier.thickness = geometry['solidify']
+    elif kind == 'curve':
+        geometry = data['curve']
+        points = geometry['points']
+        curve = bpy.data.curves.new(data['name'], 'CURVE')
+        curve.dimensions = '3D'
+        curve.bevel_depth = geometry['radius']
+        curve.bevel_resolution = 2
+        curve.resolution_u = 12
+        curve.use_fill_caps = True
+        spline = curve.splines.new(geometry['mode'].upper())
+        spline.use_cyclic_u = geometry['closed']
+        if geometry['mode'] == 'bezier':
+            spline.bezier_points.add(len(points) - 1)
+            for item, point in zip(spline.bezier_points, points):
+                item.co = point
+                item.handle_left_type = item.handle_right_type = 'AUTO'
+        else:
+            spline.points.add(len(points) - 1)
+            for item, point in zip(spline.points, points):
+                item.co = (*point, 1)
+            if geometry['mode'] == 'nurbs':
+                spline.order_u = min(4, len(points))
+                spline.use_endpoint_u = not spline.use_cyclic_u
+        obj = bpy.data.objects.new(data['name'], curve)
+        bpy.context.collection.objects.link(obj)
+    else:
+        ops[kind]()
+        obj = bpy.context.object
     obj.name = data["name"]
     transform(obj, data)
     mat = material(data["name"], data["color"], data["metallic"], data["roughness"])
@@ -252,8 +296,9 @@ def build_scene(spec, assets, name, count):
     scene.view_settings.view_transform = "AgX"
     font = bpy.data.fonts.load(str(assets / spec["font"])) if spec["font"] else None
     authored = {}
+    mesh_cache = {}
     for data in spec["objects"]:
-        authored[data["name"]] = add_object(data, assets, font)
+        authored[data["name"]] = add_object(data, assets, font, mesh_cache)
     for data in spec["objects"]:
         obj = authored[data["name"]]
         if data.get("parent"):
@@ -283,10 +328,6 @@ def build_scene(spec, assets, name, count):
     track(camera, cam_data["target"])
     scene.camera = camera
     scene.frame_set(1)
-    if spec.get('export_assets'):
-        from library_export import export_elements
-        exports = export_elements(scene, spec, authored, Path(spec['_output']), assets, spec['_export_seen'])
-        spec['_exports'].extend(exports)
     camera.keyframe_insert(data_path="location", frame=1)
     camera.keyframe_insert(data_path="rotation_euler", frame=1)
     camera.data.keyframe_insert(data_path="lens", frame=1)
@@ -312,17 +353,61 @@ def build_scene(spec, assets, name, count):
     return scene
 
 
-def run(spec_path, assets_path, mode):
-    path = Path(spec_path).resolve()
-    output, assets = path.parent, Path(assets_path).resolve()
-    spec = json.loads(path.read_text(encoding="utf-8"))
-    bpy.ops.wm.read_factory_settings(use_empty=True)
-    frames = output / "frames"
-    frames.mkdir(exist_ok=True)
-    (output / 'render-timing.json').unlink(missing_ok=True)
+def review_shot(spec, assets, output):
+    from bpy_extras.object_utils import world_to_camera_view
+
+    shot = spec['shots'][0]
+    count = max(1, round(shot['end'] * spec['fps']) - round(shot['start'] * spec['fps']))
+    objects = expand_objects(shot['objects'])
+    scale = min(1, 480 / max(spec['width'], spec['height']))
+    local = {**spec, **shot, 'objects': objects, 'samples': 2,
+             'width': max(64, round(spec['width'] * scale)),
+             'height': max(64, round(spec['height'] * scale))}
+    scene = build_scene(local, assets, 'Shot review', count)
+    groups = {}
+    for binding in shot['element_bindings']:
+        roots = [obj['name'] for obj in objects if obj['name'].split('__R', 1)[0] in binding['objects']]
+        names = descendants(objects, roots)
+        group = {scene.objects[name] for name in names}
+        groups[binding['element_id']] = [obj for obj in group | {
+            child for obj in group for child in obj.children_recursive} if obj.type in {'MESH', 'CURVE', 'FONT'}]
+    visible_times = {identifier: [] for identifier in groups}
+    images = []
+    frames = {1, (count + 1) // 2, count}
+    visibility_frames = frames | {
+        min(count, 1 + round(time * spec['fps']))
+        for binding in shot['bindings'] for time in (binding['start'], binding['end'])
+    }
+    for frame in sorted(visibility_frames):
+        scene.frame_set(frame)
+        depsgraph = bpy.context.evaluated_depsgraph_get()
+        second = round((frame - 1) / spec['fps'], 3)
+        for identifier, group in groups.items():
+            for obj in group:
+                if obj.hide_render:
+                    continue
+                evaluated = obj.evaluated_get(depsgraph)
+                projected = [world_to_camera_view(scene, scene.camera, evaluated.matrix_world @ Vector(point))
+                             for point in evaluated.bound_box]
+                if (max(p.z for p in projected) > scene.camera.data.clip_start
+                        and min(p.z for p in projected) < scene.camera.data.clip_end
+                        and min(p.x for p in projected) < 1 and max(p.x for p in projected) > 0
+                        and min(p.y for p in projected) < 1 and max(p.y for p in projected) > 0):
+                    visible_times[identifier].append(second)
+                    break
+        if frame in frames:
+            image = output / f'review-{frame:04d}.png'
+            scene.render.filepath = str(image)
+            bpy.ops.render.render(write_still=True)
+            if not complete_png(image):
+                raise RuntimeError(f'Incomplete shot preview at frame {frame}')
+            images.append({'file': image.name, 'second': second})
+    (output / 'review.json').write_text(json.dumps({'images': images, 'visible_times': visible_times}), encoding='utf-8')
+
+
+def prepare_scenes(spec, output, assets):
     scenes = []
     exported, seen = [], set()
-    spec.update(_output=str(output), _exports=exported, _export_seen=seen)
     if spec.get("shots"):
         for index, shot in enumerate(spec["shots"]):
             prefix = f"S{index+1:02d}_"
@@ -336,25 +421,87 @@ def run(spec_path, assets_path, mode):
             elements = [{**binding, 'objects':[prefix+name for name in binding['objects']]}
                         for binding in shot.get('element_bindings', [])]
             local = {**spec, **shot, "objects": objects, 'rigs':rigs, 'element_bindings':elements, "duration": shot["end"]-shot["start"]}
-            scenes.append((build_scene(local, assets, prefix+shot["title"], end-start), start))
+            try:
+                scene = build_scene(local, assets, prefix+shot["title"], end-start)
+            except Exception as exc:
+                raise RuntimeError(f"Shot {index+1} ({shot['title']}): {exc}") from exc
+            if spec.get('export_assets') or spec.get('cache_reusable_assets'):
+                from library_export import export_elements
+                try:
+                    authored = {obj['name']: scene.objects[obj['name']] for obj in objects}
+                    exported.extend(export_elements(scene, local, authored, output, assets, seen))
+                except Exception as exc:
+                    print(f'WARNING: asset cache for shot {index+1}: {exc}', flush=True)
+            scenes.append((scene, start))
     else:
         scenes.append((build_scene({**spec,'objects':expand_objects(spec['objects'])}, assets, spec["title"], max(1,round(spec["duration"]*spec["fps"]))), 0))
     first = scenes[0][0]
-    if spec.get('export_assets'):
-        (output/'exported-assets.json').write_text(json.dumps(exported, ensure_ascii=False, indent=2), encoding='utf-8')
+    if spec.get('export_assets') or exported:
+        try:
+            (output/'exported-assets.json').write_text(json.dumps(exported, ensure_ascii=False, indent=2), encoding='utf-8')
+        except OSError as exc:
+            print(f'WARNING: could not write asset cache report: {exc}', flush=True)
     bpy.context.window.scene = first
     first.frame_set(1)
     first.render.filepath = str(output / "preview.png")
     bpy.ops.file.pack_all()
-    if not (output / "scene.blend").exists():
-        bpy.ops.wm.save_as_mainfile(filepath=str(output / "scene.blend"))
+    partial = output / 'scene-partial.blend'
+    bpy.context.preferences.filepaths.save_version = 0
+    bpy.ops.wm.save_as_mainfile(filepath=str(partial), compress=False)
+    partial.replace(output / 'scene.blend')
+    return scenes
+
+
+def saved_scenes(spec, path):
+    if not complete_blend(path):
+        return []
+    try:
+        bpy.ops.wm.open_mainfile(filepath=str(path), use_scripts=False)
+        if not spec.get('shots'):
+            existing = [scene for scene in bpy.data.scenes if scene.camera]
+            return [(existing[0], 0)] if len(existing) == 1 else []
+        saved = []
+        for index, shot in enumerate(spec['shots'], 1):
+            candidates = [scene for scene in bpy.data.scenes if scene.name.startswith(f'S{index:02d}_') and scene.camera]
+            start = round(shot['start'] * spec['fps'])
+            if len(candidates) != 1 or candidates[0].frame_end != round(shot['end'] * spec['fps']) - start:
+                return []
+            saved.append((candidates[0], start))
+        return saved
+    except RuntimeError:
+        return []
+
+
+def run(spec_path, assets_path, mode):
+    path = Path(spec_path).resolve()
+    output, assets = path.parent, Path(assets_path).resolve()
+    spec = json.loads(path.read_text(encoding="utf-8"))
+    bpy.ops.wm.read_factory_settings(use_empty=True)
+    if mode == 'review':
+        review_shot(spec, assets, output)
+        return
+    frames = output / "frames"
+    frames.mkdir(exist_ok=True)
+    (output / 'render-timing.json').unlink(missing_ok=True)
+    scenes = saved_scenes(spec, output / 'scene.blend')
+    if not scenes:
+        bpy.ops.wm.read_factory_settings(use_empty=True)
+        scenes = prepare_scenes(spec, output, assets)
+    first = scenes[0][0]
+    bpy.context.window.scene = first
+    first.frame_set(1)
+    first.render.filepath = str(output / 'preview.png')
     if not complete_png(output / "preview.png"):
         checkpoint(output)
         bpy.ops.render.render(write_still=True)
     if mode == "video":
-        for scene, offset in scenes:
+        for index, (scene, offset) in enumerate(scenes, 1):
             bpy.context.window.scene = scene
-            render_frames(scene, frames, offset)
+            print(f'Rendering shot {index}/{len(scenes)} ({scene.name})', flush=True)
+            try:
+                render_frames(scene, frames, offset)
+            except Exception as exc:
+                raise RuntimeError(f'Shot {index} ({scene.name}): {exc}') from exc
 
 
 if __name__ == "__main__":

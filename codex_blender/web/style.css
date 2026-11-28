@@ -3,3 +3,5 @@
 .status-card.paused .spinner{animation:none;border-color:#8b9e86}.status-card #pause-render{margin-top:12px}.progress-track{height:8px}.status-row{flex-wrap:wrap}.status-row #progress-count{font-variant-numeric:tabular-nums}
 
 .progress-with-eta{display:flex;align-items:center;gap:12px;margin-top:14px;flex-wrap:wrap}.progress-with-eta .progress-track{flex:1 1 120px;margin-top:0}.progress-with-eta #progress-eta{font-size:11px;font-variant-numeric:tabular-nums;line-height:1.5}
+#asset-generation-settings input[type="checkbox"]{width:auto;accent-color:var(--lime)}
+#asset-generation-settings input[type="number"]{width:6rem}

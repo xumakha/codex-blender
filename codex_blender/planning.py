@@ -4,13 +4,15 @@ import json
 import re
 from .geometry import expand_objects, descendants, recipe_instances
 
-DIRECTOR_REVISION = 8
+DIRECTOR_REVISION = 9
 
 
 def signature(draft):
     values = {key: getattr(draft, key) for key in (
         "prompt", "references", "fps", "width", "height",
-        "voice_mode", "voice_id", "narration", "rate", "music", "font", "subtitles")}
+        "voice_mode", "voice_id", "narration", "rate", "music", "font", "subtitles",
+        "asset_generation_mode", "allow_custom_geometry", "require_registered_assets",
+        "require_reference_images")}
     values['_director_revision'] = DIRECTOR_REVISION
     return hashlib.sha256(json.dumps(values, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
@@ -96,7 +98,7 @@ def check_contract(plan, contract):
 def check_elements(brief, design):
     if not brief.elements:
         return
-    templates = [obj.model_dump(mode='json') for obj in design.objects]
+    templates = [obj.model_dump(mode='json', exclude={'mesh', 'curve'}) for obj in design.objects]
     expanded = expand_objects(templates)
     names = {obj.name for obj in design.objects}
     physical_elements = [element for element in brief.elements if element.construction!='overlay']
@@ -114,10 +116,21 @@ def check_elements(brief, design):
         if element.rigged and not any(rig.root in element_objects[identifier]
                 and any(bone.objects for bone in rig.bones) for rig in design.rigs):
             raise ValueError(f'{element.label}: cần rig xương thật với geometry gắn vào bone')
-        instances = recipe_instances(templates,binding.objects)
-        if element.construction=='geometry' and any(obj['kind'] in ('image','model') for obj in expanded if obj['name'].split('__R',1)[0] in element_objects[identifier]):
-            raise ValueError(f'{element.label}: phải dựng bằng hình khối Blender; không dùng ảnh hoặc mô hình đóng cứng thay thế')
-        if element.construction!='image' and len(instances)<element.count:
+        roots = set(binding.objects)
+        named = {obj['name']: obj for obj in expanded}
+        instances = set()
+        for part in expanded:
+            if part['name'].split('__R', 1)[0] not in element_objects[identifier]:
+                continue
+            if part['kind'] in ('empty', 'image') or min(abs(value) for value in part['scale']) <= .0001:
+                continue
+            current = part
+            while current:
+                if current['name'].split('__R', 1)[0] in roots:
+                    instances.add(current['name'])
+                    break
+                current = named.get(current['parent'])
+        if element.construction != 'image' and len(instances) < element.count:
             raise ValueError(f'{element.label}: chưa dựng đủ {element.count} đối tượng theo prompt')
         parts = {part.part:part for part in binding.parts}
         if len(parts)!=len(binding.parts) or set(parts)!={part.name for part in element.parts}:
@@ -140,14 +153,10 @@ def check_elements(brief, design):
             raise ValueError(f'Cảnh {brief.title}: không thể chuyển động đối tượng khác thay cho chủ thể của hành động')
 
 
-def check_inventory(plan, prompt, library_only=False):
+def check_inventory(plan, prompt):
     normalize = lambda value: ' '.join(value.casefold().split())
     original = normalize(prompt)
-    reuse_pattern = (
-        r'(?:ưu tiên|sử dụng lại|tái sử dụng|dùng lại|reuse|use existing)[^\n.]{0,160}(?:assets?|thư viện|models?)'
-        r'|(?:assets?|mô hình)[^\n.]{0,100}(?:có sẵn|trong thư viện|đã có|existing)')
-    reuse_allowed = any(re.search(reuse_pattern,line,re.I) and not re.search(
-        r'\b(không|never|without|do not|don.t)\b',line,re.I) for line in prompt.splitlines())
+    forbid_models = forbids_library_models(prompt)
     rig_required = any(re.search(r'rig xương|skeletal rig|armature|skeleton rig',line,re.I)
         and not re.search(r'\b(không|without|no)\b',line,re.I) for line in prompt.splitlines())
     for shot in plan.shots:
@@ -158,8 +167,10 @@ def check_inventory(plan, prompt, library_only=False):
                 element.rigged = True
             if normalize(element.source) not in original:
                 raise ValueError(f'{element.label}: source phải trích nguyên văn chi tiết trong prompt')
-            if element.construction=='asset' and not library_only and not reuse_allowed and not re.search(r'\.glb\b|mô hình có sẵn|asset|reuse|existing model|uploaded model',element.source,re.I):
-                raise ValueError(f'{element.label}: prompt không yêu cầu dùng asset; hãy dựng hình khối Blender')
+            if element.construction == 'overlay' and (element.role != 'graphic' or not plan.captions):
+                raise ValueError(f'{element.label}: overlay chỉ dành cho phụ đề đã bật')
+            if element.construction == 'asset' and forbid_models:
+                raise ValueError(f'{element.label}: prompt yêu cầu tự dựng bằng Blender')
             if element.role=='character' and element.construction=='geometry' and not element.parts:
                 raise ValueError(f'{element.label}: cần tách các bộ phận để dựng nhân vật bằng hình khối')
             # A mention of ten floors in a studio/character/stair description does not mean
@@ -169,6 +180,14 @@ def check_inventory(plan, prompt, library_only=False):
                 count = int(match[1])
                 if count>1 and count not in [element.count]+[part.count for part in element.parts]:
                     raise ValueError(f'{element.label}: cần khai báo {count} bộ phận theo số lượng trong prompt')
+
+
+def forbids_library_models(prompt):
+    return any(re.search(
+        r"\b(?:không (?:được )?(?:sử dụng|dùng|tái sử dụng)(?: lại)?|(?:do not|don't|never) (?:use|reuse))"
+        r"\s+(?:các?\s+|any\s+|the\s+)?(?:assets?|models?|mô hình)[^.\n]{0,80}"
+        r"(?:thư viện|có sẵn|library|existing)",
+        line, re.I) for line in prompt.splitlines())
 
 
 def normalize_inventory(plan):
@@ -195,6 +214,8 @@ def moves_during(obj, start, end):
 
 
 def check_animation(brief, design):
+    if brief.animate and not brief.actions:
+        raise ValueError(f'Cảnh {brief.title}: cần mô tả và dựng chuyển động theo prompt')
     if not brief.animate:
         return
     objects = {obj.name: obj for obj in design.objects}

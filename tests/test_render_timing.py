@@ -56,6 +56,10 @@ class RenderTimingTests(unittest.TestCase):
         self.assertEqual(jobs.status(self.path.name)['eta_seconds'],200)
         for state in ['failed','queued','encoding']:
             self.assertIsNone(self.status(state)['eta_seconds'])
+        self.assertEqual(self.status('completed')['state'], 'failed')
+        (self.path / 'preview.png').write_bytes(b'\x89PNG\r\n\x1a\n\x00\x00\x00\x00IEND\xaeB`\x82')
+        (self.path / 'scene.blend').write_bytes(b'BLENDER' + b'\x00' * 16)
+        (self.path / 'video.mp4').write_bytes(b'mp4')
         self.assertEqual(self.status('completed')['eta_seconds'],0)
 
     def test_retry_discards_timings_from_previous_run(self):

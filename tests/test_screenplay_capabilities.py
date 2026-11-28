@@ -32,10 +32,9 @@ class ScreenplayCapabilitiesTests(unittest.TestCase):
             'elements':[{'id':'table','label':'Table','source':'Bàn gỗ','role':'prop',
                          'appearance':'Wooden table','construction':'asset'}]}])
         check_inventory(plan,'Bàn gỗ.\nƯu tiên sử dụng lại các assets đã có trong thư viện.')
-        for instruction in ['Sử dụng ảnh asset reference để tham khảo phong cách.',
-                            'Không sử dụng lại các assets đã có trong thư viện.']:
-            with self.subTest(instruction=instruction), self.assertRaisesRegex(ValueError,'prompt không yêu cầu'):
-                check_inventory(plan,'Bàn gỗ.\n'+instruction)
+        check_inventory(plan,'Bàn gỗ.\nSử dụng ảnh asset reference để tham khảo phong cách.')
+        with self.assertRaisesRegex(ValueError,'yêu cầu tự dựng'):
+            check_inventory(plan,'Bàn gỗ.\nKhông sử dụng lại các assets đã có trong thư viện.')
 
     def test_legacy_music_only_scene_does_not_call_voice_service(self):
         with tempfile.TemporaryDirectory() as tmp:

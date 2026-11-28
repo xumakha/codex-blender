@@ -1,8 +1,8 @@
 import json
+import subprocess
 import os
 from pathlib import Path
 import tempfile
-import struct
 import unittest
 from unittest.mock import patch
 from starlette.testclient import TestClient
@@ -116,46 +116,52 @@ class StudioTests(unittest.TestCase):
         response=self.client.post('/api/uploads',data={'category':'models'},files={'file':('malicious.blend',b'bad')})
         self.assertEqual(response.status_code,400)
 
-    def test_references_reach_asset_preparation_then_screenplay_and_scene(self):
-        document=json.dumps({'asset':{'version':'2.0'},'meshes':[{'primitives':[]}]}).encode()
-        document+=b' '*((-len(document))%4)
-        (self.assets/'box.glb').write_bytes(struct.pack('<4sIII4s',b'glTF',2,20+len(document),len(document),b'JSON')+document)
-        image=self.assets/'reference.png';image.write_bytes(b'image')
-        p=studio.create_project(studio.Draft(prompt='Hộp xanh',references=['reference.png'],voice_id=audio.ELEVENLABS_VOICE_ID))
-        captured={};stages=[]
-        def fake_run(cmd,**kwargs):
-            captured['cmd']=cmd;captured['task']=kwargs['input']
-            output=Path(cmd[cmd.index('-o')+1])
-            stages.append(output.name.split('-')[0])
-            if output.name.startswith('assets-'):
-                from codex_blender.asset_preparation import AssetPreparation
-                value=AssetPreparation(requirements=[{'id':'box','label':'Box','source':'Hộp xanh','role':'prop','reason':'Matching blue box','objects':[{'name':'box','kind':'model','asset':'box.glb','location':[0,0,0]}]}])
-            elif output.name.startswith('screenplay-'):
-                value=VideoPlan(title='Box',duration=12,style='Library',shots=[{'title':'Rotate','start':0,'end':12,'setting':'Studio','actions':['Rotate the box'],'elements':[{'id':'box','label':'Box','source':'Hộp xanh','role':'prop','appearance':'Blue box','construction':'asset','requirement_id':'box','asset_paths':['box.glb']}]}])
+    def test_references_reach_screenplay_and_shot_and_preview_reaches_review(self):
+        image = self.assets / 'reference.png'
+        image.write_bytes(b'image')
+        preview = self.assets / 'preview.png'
+        p = studio.create_project(studio.Draft(prompt='Hộp xanh', references=['reference.png'], voice_id=audio.ELEVENLABS_VOICE_ID))
+        requests = {}
+
+        def fake_run(cmd, **kwargs):
+            output = Path(cmd[cmd.index('-o') + 1])
+            stage = output.name.rsplit('-', 1)[0]
+            requests[stage] = (cmd, json.loads(kwargs['input'].split('INPUT:\n', 1)[1]))
+            if stage == 'screenplay':
+                value = VideoPlan(title='Box', duration=12, style='Soft voxel', shots=[
+                    {'title': 'Rotate', 'start': 0, 'end': 12, 'setting': 'Studio', 'actions': ['Rotate the box'],
+                     'elements': [{'id': 'box', 'label': 'Box', 'source': 'Hộp xanh', 'role': 'prop', 'appearance': 'Blue box'}]}])
+            elif stage == 'shot-01':
+                value = ShotDesign(objects=[{'name': 'box', 'kind': 'cube', 'keyframes': [{'time': 12, 'rotation': [0, 0, 90]}]}],
+                                   bindings=[{'action_index': 0, 'objects': ['box'], 'elements': ['box'], 'start': 0, 'end': 12}],
+                                   element_bindings=[{'element_id': 'box', 'objects': ['box']}])
             else:
-                value=ShotDesign(ground=False,objects=[{'name':'box','kind':'model','asset':'box.glb','keyframes':[{'time':12,'rotation':[0,0,90]}]}],bindings=[{'action_index':0,'objects':['box'],'elements':['box'],'start':0,'end':12}],element_bindings=[{'element_id':'box','objects':['box']}])
-            output.write_text(value.model_dump_json(),encoding='utf-8')
-            class Result:returncode=0
-            return Result()
-        with patch('codex_blender.director.codex_command',return_value=['codex']),patch.object(studio.subprocess,'run',side_effect=fake_run),patch.object(studio,'render_project') as render:
-            studio.plan_scene(p['id'],studio.Draft.model_validate(p['draft']),self.assets,auto_render=True)
-            render.assert_called_once_with(p['id'],'video')
-        saved=studio.read_project(p['id'])
-        self.assertEqual(saved['state'],'ready',saved.get('error'))
-        self.assertEqual(stages,['assets','screenplay','shot'])
-        self.assertTrue(saved['asset_preparation']['ready'])
-        self.assertIn(str(image),captured['cmd'])
-        self.assertIn('art-direction references',captured['task'])
-        self.assertEqual(saved['draft']['scene']['shots'][0]['objects'][0]['name'],'box')
-        self.assertEqual(saved['draft']['duration'],12)
-        task=json.loads(captured['task'].split('INPUT:\n',1)[1])
-        self.assertEqual(task['preferred_voice_id'],audio.ELEVENLABS_VOICE_ID)
-        self.assertIn(audio.ELEVENLABS_VOICE_ID,{voice['id'] for voice in task['voices']})
-        self.assertNotIn('duration',task)
-        self.assertNotIn('script',task)
-        rendered=studio.scene_for_render(studio.Draft.model_validate(saved['draft']))
-        self.assertEqual(rendered.duration,12)
-        self.assertEqual(rendered.shots[0].objects[0].keyframes[0].time,12)
+                value = {'issues': [], 'warnings': []}
+            output.write_text(json.dumps(value) if isinstance(value, dict) else value.model_dump_json(), encoding='utf-8')
+            return subprocess.CompletedProcess(cmd, 0)
+
+        report = ({'visible_times': {'box': [0]}, 'images': []}, [preview])
+        with patch('codex_blender.director.codex_command', return_value=['codex']), \
+             patch('codex_blender.director.blender_command', return_value=['blender']), \
+             patch('codex_blender.director.render_shot_review', return_value=report), \
+             patch.object(studio.subprocess, 'run', side_effect=fake_run), patch.object(studio, 'render_project') as render:
+            studio.plan_scene(p['id'], studio.Draft.model_validate(p['draft']), self.assets, auto_render=True)
+            render.assert_called_once_with(p['id'], 'video')
+        saved = studio.read_project(p['id'])
+        self.assertEqual(saved['state'], 'ready', saved.get('error'))
+        self.assertEqual(list(requests), ['screenplay', 'shot-01', 'shot-01-review'])
+        self.assertIn(str(image), requests['screenplay'][0])
+        self.assertIn(str(image), requests['shot-01'][0])
+        self.assertEqual(requests['shot-01-review'][0].count('-i'), 1)
+        self.assertIn(str(preview), requests['shot-01-review'][0])
+        self.assertEqual(saved['generation']['generated'], 1)
+        task = requests['screenplay'][1]
+        self.assertEqual(task['preferred_voice_id'], audio.ELEVENLABS_VOICE_ID)
+        self.assertIn(audio.ELEVENLABS_VOICE_ID, {voice['id'] for voice in task['voices']})
+        self.assertNotIn('duration', task)
+        rendered = studio.scene_for_render(studio.Draft.model_validate(saved['draft']))
+        self.assertEqual(rendered.duration, 12)
+        self.assertEqual(rendered.shots[0].objects[0].keyframes[0].time, 12)
 
     def test_legacy_script_merges_without_losing_content(self):
         draft=studio.Draft(prompt='Idea',script='Full script')

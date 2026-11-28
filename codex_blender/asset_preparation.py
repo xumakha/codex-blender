@@ -1,4 +1,4 @@
-"""Prepare existing library assemblies before screenplay compilation. No mesh generation."""
+"""Catalog metadata and the legacy standalone asset-baking format."""
 import hashlib
 import json
 import struct
@@ -6,8 +6,6 @@ import struct
 from pydantic import Field
 from .config import asset_path
 from .models import Model, Object, Camera, Rig, validate_objects,validate_rigs
-
-POLICY_VERSION='library-first-generate-v2'
 
 class PreparedRequirement(Model):
     id: str = Field(pattern=r'^[A-Za-z][A-Za-z0-9_]{0,39}$')
@@ -74,7 +72,8 @@ def model_inventory(assets,root):
         if asset['kind']!='model':continue
         item={k:asset.get(k) for k in ('path','name','tags','bytes','modified')}
         item['description']=asset.get('description','')[:600]
-        sidecar=asset_path(asset['path'],root).with_suffix('.asset.json')
+        try:sidecar=asset_path(asset['path'],root).with_suffix('.asset.json')
+        except (OSError,ValueError):continue
         try:meta=json.loads(sidecar.read_text(encoding='utf-8'))
         except (ValueError,OSError):meta={}
         if not isinstance(meta,dict):meta={}
@@ -136,58 +135,3 @@ def validate_preparation(preparation,models,prompt,root):
         if any(o.keyframes for o in requirement.objects):raise ValueError('Chưa tạo animation trong bước chuẩn bị assets')
         if sum(model_counts(requirement.objects).values())<requirement.count:
             raise ValueError(f'{requirement.label}: chưa chuẩn bị đủ số lượng {requirement.count}')
-
-def missing_assets(preparation):
-    return [f'{r.label}: {r.missing}' for r in preparation.requirements if r.missing]
-
-def check_plan_assets(plan,preparation):
-    requirements={r.id:r for r in preparation.requirements};used=set()
-    if plan.export_assets:raise ValueError('Video chỉ sử dụng assets có sẵn; không tự xuất thêm asset mới')
-    for shot in plan.shots:
-        for element in shot.elements:
-            if element.construction=='overlay':
-                if element.role!='graphic' or not plan.captions:raise ValueError('Overlay chỉ dùng cho phụ đề đã bật')
-                continue
-            requirement=requirements.get(element.requirement_id)
-            if requirement is None:raise ValueError(f'{element.label}: phải tham chiếu bộ asset đã chuẩn bị trước kịch bản')
-            if element.construction!='asset':raise ValueError(f'{element.label}: bắt buộc dùng asset đã chuẩn bị, không dựng hình khối mới')
-            if not element.asset_paths or set(element.asset_paths)!=paths(requirement):raise ValueError(f'{element.label}: phải dùng đủ bộ asset đã chuẩn bị cho vật thể này')
-            if element.count<requirement.count:raise ValueError(f'{element.label}: không được giảm số lượng đã kiểm kê')
-            if requirement.rigs and not element.rigged:raise ValueError(f'{element.label}: giữ rig của bộ phận đã chuẩn bị')
-            used.add(requirement.id)
-    if used!=set(requirements):raise ValueError('Kịch bản bỏ sót vật thể/bối cảnh đã kiểm kê: '+', '.join(requirements[k].label for k in set(requirements)-used))
-
-def check_design_assets(brief,design,preparation,root):
-    requirements={r.id:r for r in preparation.requirements}
-    allowed=set().union(*(set(e.asset_paths) for e in brief.elements if e.construction!='overlay'))
-    check_models(design.objects,allowed,root)
-    validate_rigs(design.rigs,design.objects,brief.end-brief.start)
-    if design.ground:raise ValueError('Sàn/bối cảnh phải dùng asset đã chuẩn bị; đặt ground=false')
-    from .geometry import descendants,expand_objects
-    templates=[o.model_dump(mode='json') for o in design.objects];bound=set();expanded=expand_objects(templates)
-    for element in brief.elements:
-        if element.construction=='overlay':continue
-        binding=next((b for b in design.element_bindings if b.element_id==element.id),None)
-        if binding is None:raise ValueError(f'{element.label}: thiếu nhóm vật thể từ assets')
-        owned=descendants(templates,binding.objects);models=[o for o in design.objects if o.name in owned and o.kind=='model']
-        if requirements[element.requirement_id].rigs and not any(rig.root in owned for rig in design.rigs):raise ValueError(f'{element.label}: thiếu rig đã chuẩn bị cho chuyển động')
-        if not models or {o.asset for o in models}!=set(element.asset_paths):raise ValueError(f'{element.label}: không dùng đủ và đúng asset đã chuẩn bị')
-        from collections import Counter
-        actual=Counter(o['asset'] for o in expanded if o['kind']=='model' and o['name'].split('__R',1)[0] in owned)
-        expected=model_counts(requirements[element.requirement_id].objects)
-        if sum(actual.values())<element.count or any(actual[path]<count for path,count in expected.items()):raise ValueError(f'{element.label}: thiếu số lượng thành phần của bộ asset đã chuẩn bị')
-        if bound & {o.name for o in models}:raise ValueError('Mỗi vật thể riêng cần nhóm model riêng, không dùng một nhóm để thay cho nhiều vật thể')
-        bound.update(o.name for o in models)
-    if bound!={o.name for o in design.objects if o.kind=='model'}:raise ValueError('Cảnh có model ngoài các vật thể/bối cảnh đã yêu cầu')
-
-def check_scene_assets(scene,root,preparation=None):
-    """Final guard, including retries/direct scene edits that bypass the screenplay planner."""
-    from .library import catalog
-    allowed={a['path'] for a in catalog(root) if a['kind']=='model'}
-    for shot in scene.shots or [scene]:
-        check_models(shot.objects,allowed,root)
-        if shot.ground:raise ValueError('Video dùng thư viện cần sàn có sẵn, không tạo mặt phẳng thay thế')
-    if preparation and scene.shots:
-        prepared=AssetPreparation.model_validate({k:preparation[k] for k in ('requirements','constraints') if k in preparation})
-        check_plan_assets(scene,prepared)
-        for shot in scene.shots:check_design_assets(shot,shot,prepared,root)

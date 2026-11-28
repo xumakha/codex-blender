@@ -12,6 +12,7 @@ from .config import ROOT, ASSETS, blender_command, asset_path
 from .jobs import job_path, write_json
 from .audio import encode_video
 from .pause_control import checkpoint
+from .render_artifacts import complete_png, complete_blend
 
 
 def main():
@@ -40,14 +41,15 @@ def main():
             active_seconds = 0
             last = time.monotonic()
             try:
+                timeout = max(1, int(os.environ.get('CODEX_BLENDER_RENDER_TIMEOUT', '7200')))
                 while renderer.poll() is None:
                     time.sleep(.2)
                     now = time.monotonic()
                     if not (path / ".paused").exists():
                         active_seconds += now - last
                     last = now
-                    if active_seconds > 7200:
-                        raise subprocess.TimeoutExpired(command, 7200)
+                    if active_seconds > timeout:
+                        raise subprocess.TimeoutExpired(command, timeout)
                 if renderer.returncode:
                     raise subprocess.CalledProcessError(renderer.returncode, command)
             except BaseException:
@@ -55,12 +57,19 @@ def main():
                 renderer.wait()
                 raise
         checkpoint(path)
-        if not (path / "preview.png").exists() or not (path / "scene.blend").exists():
+        if not complete_png(path / 'preview.png') or not complete_blend(path / 'scene.blend'):
             raise RuntimeError("Blender exited without writing the expected artifacts")
+        try:
+            with (path / 'render.log').open(encoding='utf-8', errors='replace') as log:
+                warnings = [line.strip() for line in log if line.startswith(
+                    ('WARNING: asset cache', 'WARNING: could not write asset cache'))]
+            if warnings:
+                update(warnings=list(dict.fromkeys(warnings))[-30:])
+        except OSError:
+            pass
         if data["mode"] == "video":
             missing = [frame for frame in range(1, data["frames_total"] + 1)
-                       if not (path / "frames" / f"frame_{frame:04d}.png").is_file()
-                       or not (path / "frames" / f"frame_{frame:04d}.png").stat().st_size]
+                       if not complete_png(path / 'frames' / f'frame_{frame:04d}.png')]
             if missing:
                 raise RuntimeError(f"Blender did not render {len(missing)} required frames")
             update(state="encoding")
@@ -68,6 +77,9 @@ def main():
             encode_video(path, spec, root)
             if not (path / "video.mp4").is_file() or (path / "video.mp4").stat().st_size == 0:
                 raise RuntimeError("Video encoding produced no output")
+            subprocess.run([imageio_ffmpeg.get_ffmpeg_exe(), '-v', 'error', '-xerror',
+                            '-i', str(path / 'video.mp4'), '-map', '0:v:0', '-frames:v', '1',
+                            '-f', 'null', '-'], check=True, timeout=60)
         update(state="completed")
         print("Render completed successfully", flush=True)
     except Exception as exc:

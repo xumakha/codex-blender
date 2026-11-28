@@ -12,8 +12,9 @@ let toastTimer;
 const preferences=createPreferences({$,api,toast,dimensions,getVoiceMode:()=>S.voiceMode});
 function toast(message, error=false) { $('toast').textContent=message; $('toast').classList.toggle('error',error); $('toast').hidden=false; clearTimeout(toastTimer); toastTimer=setTimeout(()=>$('toast').hidden=true,error?7000:3500); }
 const safe = fn => async (...args) => { try {await fn(...args);} catch(error) {toast(error.message,true);} };
-const numeric=['fps','samples','rate','voice-volume','music-volume'];
-const fields=['title','prompt','fps','samples','voice-id','voice-file','narration','rate','voice-volume','music','music-volume','duck-music','subtitles','font'];
+const numeric=['max-repair-attempts','fps','samples','rate','voice-volume','music-volume'];
+const generationFields=['asset-generation-mode','cache-reusable-assets','auto-repair','max-repair-attempts'];
+const fields=[...generationFields,'title','prompt','fps','samples','voice-id','voice-file','narration','rate','voice-volume','music','music-volume','duck-music','subtitles','font'];
 function key(id){return id.replaceAll('-','_');}
 function markDirty(){ S.dirty=true; $('save-state').textContent='Chưa lưu'; renderAssetPreparation(); }
 function dimensions(){
@@ -23,6 +24,7 @@ function dimensions(){
   return map[aspect][res];
 }
 function readForm(){
+  if(!$('max-repair-attempts').checkValidity())throw new Error('Nhập số lần tự sửa hợp lệ');
   const draft=structuredClone(S.project.draft);
   for(const id of fields){ const el=$(id); draft[key(id)]=el.type==='checkbox'?el.checked:numeric.includes(id)?Number(el.value):el.value; }
   draft.script="";
@@ -33,6 +35,10 @@ function readForm(){
   draft.references=S.project.draft.references;
   draft.selected_assets=[];draft.style='';
   return draft;
+}
+function updateGenerationSettings(){
+  $('asset-mode-description').textContent={auto:'Dùng tài nguyên phù hợp và tự dựng phần còn thiếu.',full_ai:'Tự dựng toàn bộ vật thể bằng Blender.',library_first:'Ưu tiên các model phù hợp trong thư viện và tự dựng khi cần.'}[$('asset-generation-mode').value];
+  $('max-repair-attempts').disabled=busy()||!$('auto-repair').checked;
 }
 function setForm(project){
   S.project=project;
@@ -52,7 +58,7 @@ function setForm(project){
   if(presetW!==d.width||presetH!==d.height){let custom=[...$('resolution').options].find(o=>o.value==='custom');if(!custom){custom=new Option('Tùy chỉnh','custom');$('resolution').add(custom);}custom.textContent=`${d.width} × ${d.height} · từ cảnh`;$('resolution').value='custom';}
   $('scene-json').value=d.scene?JSON.stringify(d.scene,null,2):'';
   S.dirty=false;$('save-state').textContent='Đã lưu';
-  renderReferences();updateAudio();updateMetrics();updateProjectStatus();renderRecent();
+  renderReferences();updateAudio();updateGenerationSettings();updateMetrics();updateProjectStatus();renderRecent();
 }
 async function saveDraft(){
   if(!S.project) return;
@@ -118,19 +124,22 @@ function renderReferences(){
   $('upload-references').disabled=busy()||(S.project?.draft.references?.length||0)>=4;
 }
 function renderAssetPreparation(){
-  const inventory=S.dirty?null:S.project?.asset_preparation;
-  $('asset-preparation-panel').hidden=!inventory;
-  if(!inventory)return;
-  const items=inventory.requirements||[];
-  $('asset-preparation-title').textContent=`Bộ assets: ${items.length} vật thể/bối cảnh · ${inventory.ready?'Đã đủ':inventory.generation_state==='generating'?'Đang tự dựng phần còn thiếu':'Đang chuẩn bị'}`;
-  const names=new Map(S.assets.map(a=>[a.path,a.name]));
-  $('prepared-assets').innerHTML=items.map(r=>{const paths=[...new Set((r.objects||[]).filter(o=>o.kind==='model').map(o=>o.asset))];return `<p><strong>${esc(r.label)} × ${r.count}</strong><br>${r.missing?`Sẽ tự dựng: ${esc(r.missing)}`:paths.map(path=>esc(names.get(path)||path)).join(' · ')}<br><small>${esc(r.reason)}</small></p>`;}).join('');
+  const generation=S.dirty?null:S.project?.generation;
+  const warnings=S.dirty?[]:[...(S.project?.generation_warnings||[]),...(S.project?.job?.warnings||[])];
+  $('asset-preparation-panel').hidden=!generation&&!warnings.length;
+  $('asset-preparation-title').textContent=generation
+    ?`Cảnh ${generation.shot}/${generation.total} · ${generation.reused} mục dùng model có sẵn · ${generation.generated} mục tự dựng`
+    :'Nhật ký dựng cảnh';
+  const details=[generation?.title,generation?.issue].filter(Boolean).map(text=>`<p>${esc(text)}</p>`);
+  const repairs=(generation?.repairs||[]).map(item=>`<p>Cảnh ${item.shot} · ${item.attempt?`Lần tự sửa ${item.attempt}`:'Lần dựng đầu'} · ${esc(item.result)}</p>`);
+  $('prepared-assets').innerHTML=[...details,...repairs,...warnings.map(text=>`<p>Lưu ý · ${esc(text)}</p>`)].join('');
 }
 function mediaSource(element,url){if(element.dataset.source!==url){element.src=url;element.dataset.source=url;}}
 function updateProjectStatus(){
   const p=S.project;if(!p)return;renderAssetPreparation();
   const isBusy=busy();document.body.classList.toggle('busy',isBusy);
   for(const el of document.querySelectorAll('.editor input,.editor textarea,.editor select')) el.disabled=!!isBusy;
+  updateGenerationSettings();
   for(const id of ['save-project','generate','import-script','upload-voice','upload-music','upload-font','add-reference'])$(id).disabled=!!isBusy;
   $('render-preview').disabled=isBusy||!p.draft.scene;$('render-video').disabled=isBusy||!p.draft.scene;
   $('generate').querySelector('span').textContent=p.state==='planning'?'Đang đọc prompt…':p.draft.scene?'Tạo lại video':'Tạo video';
@@ -145,10 +154,14 @@ function updateProjectStatus(){
   $('screenplay-warnings').textContent=warnings.length?'Lưu ý khi tạo video: '+warnings.join(' '):'';
   if($('storyboard').dataset.content!==storyboard){$('storyboard').innerHTML=`<h2>Phân cảnh theo prompt</h2>${storyboard}`;$('storyboard').dataset.content=storyboard;}
   const job=p.job;
-  $('retry-actions').hidden=isBusy||job?.state!=='failed';
+  const canContinuePlan=p.state==='error'&&!!p.draft.prompt?.trim()&&(!!p.failed_plan||!p.scene_current);
+  $('retry-actions').hidden=isBusy||(!canContinuePlan&&job?.state!=='failed');
+  $('retry-render').textContent=canContinuePlan?'Tiếp tục tạo video đang dở':'Tiếp tục render';
+  $('render-log').hidden=!job||canContinuePlan;
   $('retry-render').disabled=!!isBusy;
   if(job)$('render-log').href=jobURL(job.id,'render.log');
-  const working=['planning','preparing_audio','exporting'].includes(p.state)?p.state:job?.state;
+  const staleResult=job?.state==='completed'&&p.scene_current===false;
+  const working=['planning','preparing_audio','exporting'].includes(p.state)?p.state:p.state==='error'||staleResult?null:job?.state;
   const labels={planning:'Codex đang lên cảnh',preparing_audio:'Đang tạo giọng đọc',exporting:'Đang lưu asset Blender',queued:'Đang chờ render',rendering:'Blender đang render',encoding:'Đang ghép âm thanh & xuất MP4',completed:job?.mode==='video'?'Video đã hoàn tất':'Preview đã sẵn sàng',failed:'Render chưa hoàn tất'};
   $('status-card').hidden=!working||working==='idle'||working==='ready'||working==='error';
   Object.assign(labels,{pausing:'Đang chờ tạm dừng',paused:'Đã tạm dừng render'});
@@ -174,7 +187,7 @@ function updateProjectStatus(){
   Object.assign(descriptions,{pausing:'Blender sẽ tạm dừng sau khi hoàn tất khung hình đang xử lý.',paused:'Các khung hình đã render được giữ lại. Bấm Tiếp tục để dựng tiếp.'});
   $('status-detail').textContent=(p.state==='planning'?p.planning_detail:null)||descriptions[working]||'';
   const error=p.error||job?.error;$('project-error').hidden=!error;$('project-error').textContent=error||'';
-  const hasVideo=p.scene_current!==false&&job?.state==='completed'&&job?.artifacts?.['video.mp4'];
+  const hasVideo=p.state!=='error'&&p.scene_current!==false&&job?.state==='completed'&&job?.artifacts?.['video.mp4'];
   const hasPreview=p.scene_current!==false&&job?.artifacts?.['preview.png'];
   $('preview-video').hidden=!hasVideo;$('preview-image').hidden=!!hasVideo||!hasPreview;$('preview-empty').hidden=!!hasVideo||!!hasPreview;
   if(hasVideo)mediaSource($('preview-video'),jobURL(job.id,'video.mp4'));
@@ -272,7 +285,7 @@ async function boot(){
   const page=location.hash.slice(1);if(['studio','assetgen','library','history','settings'].includes(page))showPage(page);
   S.poll=setInterval(poll,2500);
 }
-for(const id of fields){$(id).addEventListener('input',()=>{markDirty();updateMetrics();if(['music','voice-file','voice-id'].includes(id))updateAudio();});}
+for(const id of fields){$(id).addEventListener('input',()=>{markDirty();updateMetrics();if(generationFields.includes(id))updateGenerationSettings();if(['music','voice-file','voice-id'].includes(id))updateAudio();});}
 $('scene-json').addEventListener('input',markDirty);
 for(const id of ['aspect','resolution'])$(id).addEventListener('change',()=>{if(id==='aspect'&&$('resolution').value==='custom')$('resolution').value='draft';markDirty();updateMetrics();});
 $('new-project').onclick=safe(()=>newProject());
@@ -287,9 +300,21 @@ $('pause-render').onclick=safe(async()=>{
     if(S.project?.id===id)S.project=project;
   }finally{S.controlPending=false;updateProjectStatus();}
 });
+$('copy-generation-config').onclick=safe(async()=>{
+  if(!$('max-repair-attempts').checkValidity())throw new Error('Nhập số lần tự sửa hợp lệ');
+  const settings=Object.fromEntries(generationFields.map(id=>{
+    const el=$(id);
+    return [key(id),el.type==='checkbox'?el.checked:el.type==='number'?Number(el.value):el.value];
+  }));
+  await navigator.clipboard.writeText(JSON.stringify({...settings,allow_custom_geometry:true,
+    require_registered_assets:false,require_reference_images:false},null,2));
+  toast('Đã sao chép cấu hình JSON');
+});
 $('retry-render').onclick=safe(async()=>{
+  if(S.dirty)await saveDraft();
   S.project=await api(`/api/projects/${S.project.id}/retry`,{method:'POST',body:{}});
-  updateProjectStatus();toast('Đang tiếp tục render các khung hình còn thiếu.');
+  updateProjectStatus();
+  toast(S.project.state==='planning'?'Đang tiếp tục dựng cảnh từ checkpoint.':'Đang tiếp tục render các khung hình còn thiếu.');
 });
 for(const [id,mode] of [['render-preview','preview'],['render-video','video']])$(id).onclick=safe(async()=>{await saveDraft();S.project=await api(`/api/projects/${S.project.id}/render`,{method:'POST',body:{mode}});updateProjectStatus();});
 $('upload-references').onclick=()=>chooseFile('references',async path=>{await addReference(path);renderReferences();},true);

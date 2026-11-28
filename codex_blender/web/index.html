@@ -32,7 +32,7 @@
  <header class="topbar"><div class="breadcrumbs">Workspace <span>/</span> <strong id="breadcrumb">Video studio</strong></div><div class="connection"><span id="connection-dot" class="dot"></span><span id="connection-label">Đang kết nối Blender</span><span class="local-badge">LOCAL</span></div></header>
  <main>
  <section id="page-studio" class="page">
-  <div class="page-heading"><div><p class="eyebrow">YOUR NEXT STORY</p><h1>Biến ý tưởng thành chuyển động.</h1><p>Tự chọn và lắp ghép assets phù hợp từ thư viện để dựng video theo prompt.</p></div><button id="save-project" class="button secondary"><svg><use href="#i-check"/></svg>Lưu dự án</button></div>
+  <div class="page-heading"><div><p class="eyebrow">YOUR NEXT STORY</p><h1>Biến ý tưởng thành chuyển động.</h1><p>Viết prompt để dựng từng phân cảnh và render video bằng Blender.</p></div><button id="save-project" class="button secondary"><svg><use href="#i-check"/></svg>Lưu dự án</button></div>
   <div class="studio-layout">
    <div class="editor">
     <div class="project-title-row"><span class="project-icon"><svg><use href="#i-cube"/></svg></span><input id="title" aria-label="Tên dự án" value="Video mới" maxlength="200"><span id="save-state" class="muted">Bản nháp</span></div>
@@ -40,9 +40,17 @@
     <div class="tab-panel" id="tab-script">
      <div class="label-row"><label for="prompt">Prompt tổng</label><button class="text-button" id="import-script"><svg><use href="#i-upload"/></svg>Nhập file .txt</button></div>
      <textarea id="prompt" rows="12" maxlength="70002" placeholder="Mô tả toàn bộ video bạn muốn: nội dung, kịch bản, hành động, phong cách, lời thoại… Ví dụ: Giải thích cách thang máy hoạt động bằng mô hình 3D cắt lớp, nhân vật áo vàng, ánh sáng mềm. Bạn có thể ghi thời lượng mong muốn ngay trong prompt."></textarea><div class="field-foot"><span>AI đọc prompt, tự chọn thời lượng phù hợp và dựng video (tối đa 3600 giây).</span><span id="prompt-count">0 ký tự</span></div>
-     <p class="helper" id="library-policy">AI ưu tiên model phù hợp trong thư viện. Nếu thiếu, tool tự dựng bổ sung dựa trên các model và khối Core đã có, có thể đổi vật liệu, tách bộ phận và tạo rig. Assets mới được lưu lại trước khi viết kịch bản, tạo chuyển động và render.</p>
-     <details id="asset-preparation-panel" hidden><summary id="asset-preparation-title">Bộ assets cho video</summary><div id="prepared-assets" class="helper"></div></details>
-     <details><summary>Ảnh tham khảo cho nội dung và bố cục</summary><p class="helper">Tool tham khảo ảnh để lựa chọn và sắp xếp assets có sẵn.</p><div id="reference-grid" class="reference-grid"></div><button class="upload-zone" id="upload-references"><svg><use href="#i-image"/></svg><strong>Thêm ảnh tham khảo</strong><span>Tối đa 4 ảnh PNG hoặc JPG</span></button><div class="inline-controls"><select id="existing-reference" aria-label="Ảnh trong thư viện"></select><button id="add-reference" class="button secondary small">Thêm từ thư viện</button></div></details>
+     <p class="helper" id="library-policy">AI phân tích prompt trước rồi dựng vật thể theo nhu cầu của mỗi cảnh. Thư viện và ảnh tham khảo đều tùy chọn.</p>
+     <details id="asset-generation-settings"><summary>Chế độ tạo Assets</summary>
+      <label>Chế độ<select id="asset-generation-mode"><option value="auto">Tự động – Hybrid</option><option value="full_ai">Full AI Generation</option><option value="library_first">Library First</option></select></label>
+      <p class="helper" id="asset-mode-description"></p>
+      <label><input type="checkbox" id="cache-reusable-assets"> Lưu assets mới có khả năng tái sử dụng</label>
+      <label><input type="checkbox" id="auto-repair"> Tự động sửa lỗi phân cảnh</label>
+      <label>Số lần tự sửa tối đa<input type="number" id="max-repair-attempts" min="0" step="1" value="3" required></label>
+      <button type="button" class="button secondary small" id="copy-generation-config">Sao chép cấu hình JSON</button>
+     </details>
+     <details id="asset-preparation-panel" hidden><summary id="asset-preparation-title">Tiến độ dựng cảnh</summary><div id="prepared-assets" class="helper"></div></details>
+     <details><summary>Ảnh tham khảo phong cách</summary><p class="helper">Ảnh tùy chọn giúp thống nhất hình khối, chất liệu, màu sắc và nhận diện nhân vật.</p><div id="reference-grid" class="reference-grid"></div><button class="upload-zone" id="upload-references"><svg><use href="#i-image"/></svg><strong>Thêm ảnh tham khảo</strong><span>Tối đa 4 ảnh PNG hoặc JPG</span></button><div class="inline-controls"><select id="existing-reference" aria-label="Ảnh trong thư viện"></select><button id="add-reference" class="button secondary small">Thêm từ thư viện</button></div></details>
     </div>
     <div class="tab-panel" id="tab-audio" hidden>
      <p id="background-only-note" class="helper">Video chỉ phát một nhạc nền duy nhất từ đầu tới cuối. Giọng đọc, âm thanh của clip và mọi hiệu ứng đều tắt. Chọn nhạc bên dưới hoặc để tool tạo một nền nhạc đơn giản.</p>

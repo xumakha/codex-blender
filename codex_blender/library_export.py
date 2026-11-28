@@ -12,7 +12,8 @@ from geometry import descendants
 def export_elements(scene, shot, authored, output, assets, seen):
     exported = []
     for element in shot.get('elements', []):
-        if element['construction'] != 'geometry' or element['id'] in seen:
+        if (element['construction'] in {'image', 'overlay'} or element['id'] in seen
+                or not (shot.get('export_assets') or element.get('reusable'))):
             continue
         binding = next((item for item in shot.get('element_bindings', [])
                         if item['element_id'] == element['id']), None)
@@ -20,6 +21,9 @@ def export_elements(scene, shot, authored, output, assets, seen):
             continue
         roots = [obj['name'] for obj in shot['objects'] if obj['name'].split('__R', 1)[0] in binding['objects']]
         names = descendants(shot['objects'], roots)
+        if not shot.get('export_assets') and any(obj['kind'] in {'model', 'image'} or obj['keyframes']
+                                                for obj in shot['objects'] if obj['name'] in names):
+            continue
         selected = {authored[name] for name in names}
         selected |= {child for obj in list(selected) for child in obj.children_recursive}
         # Keep skeleton dependencies so character GLBs remain rigged on reuse.

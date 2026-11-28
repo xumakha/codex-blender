@@ -1,4 +1,4 @@
-"""Declarative scene format. No user supplied Python is executed."""
+"""Scene format including direct and procedural mesh definitions."""
 import math
 from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field, AfterValidator, model_validator
@@ -35,9 +35,28 @@ class Repetition(Model):
     rotation: Vec3 = (0, 0, 0)
 
 
+class MeshGeometry(Model):
+    vertices: list[Vec3] = Field(default_factory=list, max_length=50_000)
+    faces: list[list[int]] = Field(default_factory=list, max_length=50_000)
+    program: str | None = Field(default=None, max_length=24_000)
+    smooth: bool = False
+    subdivision: int = Field(default=0, ge=0, le=2)
+    solidify: float = Field(default=0, ge=0, le=1)
+    mirror_x: bool = False
+
+
+class CurveGeometry(Model):
+    points: list[Vec3] = Field(min_length=2, max_length=5000)
+    mode: Literal['bezier', 'nurbs', 'poly'] = 'bezier'
+    closed: bool = False
+    radius: float = Field(gt=0, le=1000)
+
+
 class Object(Model):
     name: str = Field(min_length=1, max_length=100)
-    kind: Literal["cube", "sphere", "cylinder", "cone", "torus", "plane", "text", "model", "image", "empty"]
+    kind: Literal["cube", "sphere", "cylinder", "cone", "torus", "plane", "text", "model", "image", "empty", "mesh", "curve"]
+    mesh: MeshGeometry | None = None
+    curve: CurveGeometry | None = None
     location: Vec3 = (0, 0, 1)
     rotation: Vec3 = (0, 0, 0)
     scale: Vec3 = (1, 1, 1)
@@ -63,6 +82,10 @@ class Object(Model):
             raise ValueError("model/image objects require an asset path")
         if self.asset and self.kind not in ('model','image'):
             raise ValueError("asset must be null for primitives/text/empty; text uses the video's font")
+        if (self.kind == 'mesh') != (self.mesh is not None):
+            raise ValueError("Custom mesh data is required exactly for kind=mesh")
+        if (self.kind == 'curve') != (self.curve is not None):
+            raise ValueError("Curve data is required exactly for kind=curve")
         return self
 
 
@@ -151,6 +174,7 @@ class GeometryElement(Model):
     requirement_id: str | None = None
     asset_paths: list[str] = Field(default_factory=list,max_length=150)
     rigged: bool = False
+    reusable: bool = False
     count: int = Field(default=1, ge=1, le=1000)
     appearance: str = Field(min_length=1, max_length=3000)
     parts: list[ElementPart] = Field(default_factory=list, max_length=40)
@@ -161,11 +185,11 @@ class ShotBrief(Model):
     start: float = Field(ge=0, le=MAX_DURATION)
     end: float = Field(gt=0, le=MAX_DURATION)
     setting: str = Field(min_length=1, max_length=5000)
-    actions: list[str] = Field(min_length=1, max_length=40)
+    actions: list[str] = Field(max_length=40)
     # Global video timestamps, so narration keeps its exact position across cuts.
     narration: list[SpeechCue] = Field(default_factory=list, max_length=100)
     animate: bool = True
-    elements: list[GeometryElement] = Field(default_factory=list, max_length=60)
+    elements: list[GeometryElement] = Field(default_factory=list)
 
 
 class ActionBinding(Model):
@@ -201,10 +225,10 @@ class ShotDesign(Model):
     ambient: float = Field(default=.5, ge=0, le=10)
     lights: list[AreaLight] = Field(default_factory=lambda: [AreaLight(location=(2,-4,8)), AreaLight(location=(-5,-1,5),energy=1200), AreaLight(location=(2,5,6),energy=2200)], max_length=10)
     camera: Camera = Field(default_factory=Camera)
-    objects: list[Object] = Field(min_length=1, max_length=150)
+    objects: list[Object] = Field(min_length=1)
     rigs: list[Rig] = Field(default_factory=list, max_length=30)
     bindings: list[ActionBinding] = Field(default_factory=list, max_length=100)
-    element_bindings: list[ElementBinding] = Field(default_factory=list, max_length=60)
+    element_bindings: list[ElementBinding] = Field(default_factory=list)
 
 
 class Shot(ShotBrief, ShotDesign):
@@ -273,7 +297,7 @@ def validate_rigs(rigs, objects, duration):
                 chain.add(parent)
                 parent = bones[parent].parent
             for name in bone.objects:
-                if name not in owned or lookup[name].kind not in {'cube','sphere','cylinder','cone','torus','plane','model'}:
+                if name not in owned or lookup[name].kind not in {'cube','sphere','cylinder','cone','torus','plane','model','mesh'}:
                     raise ValueError('Bones must bind mesh geometry inside their rig root')
                 if name in bound:
                     raise ValueError('A geometry object may bind to only one bone')
@@ -302,7 +326,25 @@ def validate_shots(shots, duration):
 
 def validate_objects(objects, camera, duration):
     from .geometry import expand_objects
-    expand_objects([obj.model_dump(mode='json') for obj in objects])
+    from .mesh_program import build_mesh, validate_mesh, mesh_budget
+    expanded = expand_objects([obj.model_dump(mode='json', exclude={'mesh', 'curve'}) for obj in objects])
+    costs = {}
+    for obj in objects:
+        if obj.curve is not None:
+            costs[obj.name] = len(obj.curve.points) * 12 * 12
+        if obj.mesh is None:
+            continue
+        mesh = obj.mesh
+        if mesh.program is not None:
+            if mesh.vertices or mesh.faces:
+                raise ValueError(f'{obj.name}: choose a mesh program or explicit vertices/faces')
+            vertices, faces = build_mesh(mesh.program)
+        else:
+            vertices, faces = validate_mesh(mesh.vertices, mesh.faces)
+        costs[obj.name] = (len(vertices) + sum(map(len, faces)) * (4 ** mesh.subdivision)) * (
+            (2 if mesh.mirror_x else 1) * (2 if mesh.solidify else 1))
+    if sum(costs.get(obj['name'].split('__R', 1)[0], 0) for obj in expanded) > mesh_budget():
+        raise ValueError('Custom meshes exceed the configured shot geometry budget')
     names = {obj.name for obj in objects}
     if len(names) != len(objects):
         raise ValueError("Object names must be unique within a shot")
@@ -335,7 +377,7 @@ class SceneSpec(Model):
     floor: Color = "#202C40"
     ground: bool = True
     camera: Camera = Field(default_factory=Camera)
-    objects: list[Object] = Field(default_factory=list, max_length=150)
+    objects: list[Object] = Field(default_factory=list)
     rigs: list[Rig] = Field(default_factory=list, max_length=30)
     shots: list[Shot] = Field(default_factory=list, max_length=60)
     captions: bool = False
@@ -347,6 +389,7 @@ class SceneSpec(Model):
     music_style: Literal['none','playful','ambient','triumphant'] = 'none'
     music_cues: list[MusicCue] = Field(default_factory=list, max_length=100)
     export_assets: bool = False
+    cache_reusable_assets: bool = False
     warnings: list[str] = Field(default_factory=list, max_length=30)
     effects: list[SoundCue] = Field(default_factory=list, max_length=200)
     voice_volume: float = Field(default=1, ge=0, le=2)

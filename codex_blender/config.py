@@ -1,8 +1,10 @@
 import importlib.util
 import hashlib
+import json
 import os
 from pathlib import Path
 import shutil
+import struct
 
 ROOT = Path(__file__).resolve().parent.parent
 ASSETS = ROOT / "assets"
@@ -97,17 +99,27 @@ def blender_command() -> list[str]:
     raise RuntimeError("Blender not found. Install Blender and set BLENDER_PATH, or install bpy in .venv.")
 
 
-def validate_assets(spec, root: Path | None = None):
+class ModelAssetError(ValueError):
+    """A model or image used by the scene cannot be loaded."""
+
+
+def validate_assets(spec, root: Path | None = None, *, geometry=True):
     extensions = {"model": {".glb", ".gltf", ".obj"}, "image": {".png", ".jpg", ".jpeg"}}
     objects = list(spec.objects) + [obj for shot in spec.shots for obj in shot.objects]
-    for obj in objects:
+    inspected = set()
+    for obj in objects if geometry else ():
         if obj.asset:
-            path = asset_path(obj.asset, root)
-            if obj.kind not in extensions or path.suffix.lower() not in extensions[obj.kind]:
-                raise ValueError("Unsupported asset type for object")
-            # GLB is self-contained; glTF/OBJ may reference sibling resources.
-            if path.suffix.lower() in {".gltf", ".obj"}:
-                raise ValueError("Use self-contained .glb models (convert glTF/OBJ in Blender first)")
+            try:
+                path = asset_path(obj.asset, root)
+                if obj.kind not in extensions or path.suffix.lower() not in extensions[obj.kind]:
+                    raise ValueError("Unsupported asset type for object")
+                if path.suffix.lower() in {".gltf", ".obj"}:
+                    raise ValueError("Use self-contained .glb models (convert glTF/OBJ in Blender first)")
+                if obj.kind == 'model' and path not in inspected:
+                    validate_glb(path)
+                    inspected.add(path)
+            except (OSError, ValueError) as exc:
+                raise ModelAssetError(f'{obj.name}: {exc}') from exc
     if spec.audio:
         if asset_path(spec.audio, root).suffix.lower() not in {".wav", ".mp3", ".ogg", ".m4a"}:
             raise ValueError("Audio must be wav, mp3, ogg or m4a")
@@ -126,3 +138,24 @@ def validate_assets(spec, root: Path | None = None):
     for effect in spec.effects:
         if effect.audio:
             asset_path(effect.audio, root)
+
+
+def validate_glb(path):
+    """Validate the container and allow only embedded resources."""
+    try:
+        with path.open('rb') as stream:
+            magic, version, size, json_size, kind = struct.unpack('<4sIII4s', stream.read(20))
+            if (magic, version, kind) != (b'glTF', 2, b'JSON') or size != path.stat().st_size:
+                raise ValueError('Invalid GLB header')
+            limit = int(os.environ.get('CODEX_BLENDER_GLB_JSON_BUDGET', '32000000'))
+            if not 0 < json_size <= min(size - 20, limit):
+                raise ValueError('Invalid GLB metadata size')
+            document = json.loads(stream.read(json_size))
+        if not isinstance(document, dict) or not document.get('meshes'):
+            raise ValueError('GLB has no mesh')
+        for item in document.get('buffers', []) + document.get('images', []):
+            uri = item.get('uri')
+            if uri is not None and (not isinstance(uri, str) or not uri.startswith('data:')):
+                raise ValueError('GLB must embed all buffers and images')
+    except (OSError, ValueError, struct.error, AttributeError, TypeError) as exc:
+        raise ValueError(f'{path.name}: {exc}') from exc

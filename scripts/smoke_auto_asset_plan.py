@@ -1,4 +1,4 @@
-"""Real planner integration: missing icy material must be generated/exported before screenplay."""
+"""Real Hybrid planner integration with an incomplete library and a native Blender material."""
 import json
 from pathlib import Path
 import shutil
@@ -18,15 +18,14 @@ project=studio.create_project(draft);pid=project['id'];print('PLANNING',pid,flus
 studio.plan_scene(pid,draft,root)
 project=studio.read_project(pid)
 assert project['state']=='ready',project.get('error')
-preparation=project['asset_preparation'];assert preparation['ready']
-generated=list((root/'generated'/'auto-prepared').glob('*/assembly.glb'))
-assert generated,'Expected automatic material generation before screenplay'
 scene=studio.scene_for_render(studio.Draft.model_validate(project['draft']))
+materials = [obj for shot in scene.shots for obj in shot.objects if obj.transmission > .2]
+assert materials, 'Expected a translucent ice material'
 job=jobs.submit(scene,'video',root);deadline=time.monotonic()+180
 while time.monotonic()<deadline:
     state=jobs.status(job['id'])
     if state['state'] in ('completed','failed'):break
     time.sleep(1)
 assert state['state']=='completed',state
-result={'passed':True,'generated_assemblies':len(generated),'video':state['artifacts']['video.mp4'],'project':pid}
+result={'passed':True,'generation':project['generation'],'video':state['artifacts']['video.mp4'],'project':pid}
 (run/'result.json').write_text(json.dumps(result,indent=2),encoding='utf-8');print(json.dumps(result),flush=True)

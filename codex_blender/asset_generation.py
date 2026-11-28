@@ -1,4 +1,4 @@
-"""Generate missing prompt assets from library references, bake them, and retain their movable parts."""
+"""Legacy standalone asset baking from library references, including movable parts."""
 import hashlib
 import json
 import os
@@ -110,7 +110,7 @@ def validate_generated(design,models,root):
                 if not any(fnmatch.fnmatchcase(name,pattern.casefold()) or pattern.casefold() in name for pattern in obj.asset_nodes for name in names):
                     raise ValueError(f'{obj.name}: asset_nodes không khớp bộ phận nào trong model tham khảo')
         if obj.keyframes:raise ValueError('Chưa tạo chuyển động trong bước chuẩn bị vật thể')
-    if any(bone.keyframes for rig in design.rigs for bone in rig.bones):raise ValueError('Chuẩn bị rig ở tư thế nghỉ trước khi viết kịch bản')
+    if any(bone.keyframes for rig in design.rigs for bone in rig.bones):raise ValueError('Asset dùng lại cần lưu rig ở tư thế nghỉ')
     if not any(o.kind!='empty' for o in design.objects):raise ValueError('Cần dựng hình học nhìn thấy được cho asset')
     validate_objects(design.objects,design.camera,1);validate_rigs(design.rigs,design.objects,1)
 

@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from .config import ROOT, ASSETS, OUTPUTS, blender_command, validate_assets, assets_dir
 from .models import SceneSpec
 from .render_timing import remaining_seconds
+from .render_artifacts import complete_blend, complete_png
 
 LOCK = threading.RLock()
 
@@ -35,6 +36,14 @@ def status(job_id):
     data = json.loads((path / "status.json").read_text(encoding="utf-8"))
     data["frames_rendered"] = len(list((path / "frames").glob("frame_*.png")))
     data["artifacts"] = {name: str(path / name) for name in ("scene.json", "scene.blend", "preview.png", "video.mp4", "render.log", "exported-assets.json") if (path / name).exists()}
+    if data['state'] == 'completed':
+        video = path / 'video.mp4'
+        try:
+            valid_video = data.get('mode') != 'video' or video.stat().st_size > 0
+        except OSError:
+            valid_video = False
+        if not (valid_video and complete_png(path / 'preview.png') and complete_blend(path / 'scene.blend')):
+            data.update(state='failed', error='Kết quả render thiếu hoặc hỏng. Có thể tiếp tục từ các khung hình đã lưu.')
     # Detect interrupted worker rather than presenting a stale running status forever.
     if data["state"] in {"queued", "rendering", "encoding"} and data.get("pid"):
         import psutil
@@ -120,7 +129,8 @@ def retry(job_id):
         path = job_path(job_id)
         data = json.loads((path / "status.json").read_text(encoding="utf-8"))
         spec = SceneSpec.model_validate_json((path / "scene.json").read_text(encoding="utf-8"))
-        validate_assets(spec, Path(data.get("assets_directory", str(ASSETS))))
+        validate_assets(spec, Path(data.get("assets_directory", str(ASSETS))),
+                        geometry=not complete_blend(path / 'scene.blend'))
         blender_command()
         for key in ("pid", "process_created", "error"):
             data.pop(key, None)

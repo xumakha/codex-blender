@@ -1,10 +1,13 @@
 """Expand native Blender assembly recipes into explicit, independently animatable parts."""
 from copy import deepcopy
+import os
 
 MAX_EXPANDED_OBJECTS = 4000
 
 
-def expand_objects(objects, limit=MAX_EXPANDED_OBJECTS):
+def expand_objects(objects, limit=None):
+    if limit is None:
+        limit = max(1, int(os.environ.get('CODEX_BLENDER_OBJECT_BUDGET', MAX_EXPANDED_OBJECTS)))
     children = {}
     names = {obj['name'] for obj in objects}
     if len(names) != len(objects):
@@ -24,7 +27,7 @@ def expand_objects(objects, limit=MAX_EXPANDED_OBJECTS):
         repeat = template.get('repeat') or {'count':1,'offset':[0,0,0],'rotation':[0,0,0]}
         for index in range(repeat['count']):
             tag = suffix + (f'__R{len(chain)}_{index}' if index else '')
-            obj = deepcopy(template)
+            obj = {**template, 'keyframes': deepcopy(template.get('keyframes', []))}
             obj['name'], obj['parent'], obj['repeat'] = template['name']+tag, parent, None
             for prop, delta in (('location', repeat['offset']), ('rotation', repeat['rotation'])):
                 obj[prop] = [value+index*step for value,step in zip(obj[prop],delta)]
