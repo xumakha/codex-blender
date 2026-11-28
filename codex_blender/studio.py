@@ -196,6 +196,13 @@ def plan_scene(pid, draft, root, auto_render=False, render_mode="video"):
                      failed_plan={'signature': signature(draft), 'auto_render': auto_render, 'mode': render_mode})
 
 
+def validate_voice_input(draft):
+    if draft.voice_mode == 'upload' and not draft.voice_file:
+        raise ValueError('Chọn hoặc tải lên file giọng đọc trước khi xuất video')
+    if draft.voice_mode == 'tts' and not draft.narration.strip():
+        raise ValueError('Nhập lời thuyết minh để tạo giọng đọc AI')
+
+
 def start_plan(pid, auto_render=False, render_mode="video"):
     with LOCK:
         project = read_project(pid)
@@ -203,6 +210,8 @@ def start_plan(pid, auto_render=False, render_mode="video"):
         draft = Draft.model_validate(project["draft"])
         if not (draft.prompt.strip() or draft.script.strip()):
             raise ValueError("Nhập prompt mô tả video trước khi tạo")
+        if auto_render and render_mode == 'video':
+            validate_voice_input(draft)
         request = {'signature': signature(draft), 'auto_render': auto_render, 'mode': render_mode}
         owner = {'pid': os.getpid(), 'created': psutil.Process().create_time(), 'request': request}
         save_project(pid, state="planning", error=None, failed_plan=None, planning_owner=owner)
@@ -215,26 +224,36 @@ def scene_for_render(draft):
         raise ValueError("Hãy tạo cảnh bằng AI hoặc nạp cảnh mẫu trước")
     scene = draft.scene.model_copy(deep=True)
     scene.cache_reusable_assets = draft.cache_reusable_assets and bool(draft.prompt.strip())
-    from .sounddesign import background_only
-    if scene.shots:
-        # The compiled screenplay owns its timing, composition and audio.
-        scene.samples = draft.samples
-        return background_only(scene, draft.music, draft.music_volume)
-    factor = draft.duration / scene.duration
-    for obj in scene.objects:
-        for key in obj.keyframes:
-            key.time = min(draft.duration, round(key.time * factor, 5))
-    for rig in scene.rigs:
-        for bone in rig.bones:
-            for key in bone.keyframes:
+    scene.samples = draft.samples
+    if not scene.shots:
+        factor = draft.duration / scene.duration
+        for obj in scene.objects:
+            for key in obj.keyframes:
                 key.time = min(draft.duration, round(key.time * factor, 5))
-    scene.title, scene.duration, scene.fps = draft.title, draft.duration, draft.fps
-    scene.width, scene.height, scene.samples = draft.width, draft.height, draft.samples
+        for rig in scene.rigs:
+            for bone in rig.bones:
+                for key in bone.keyframes:
+                    key.time = min(draft.duration, round(key.time * factor, 5))
+        scene.title, scene.duration, scene.fps = draft.title, draft.duration, draft.fps
+        scene.width, scene.height = draft.width, draft.height
+        scene.audio = None
+    if draft.music:
+        scene.music, scene.music_cues = draft.music, []
+    scene.music_volume = draft.music_volume
+    scene.subtitles = draft.subtitles or scene.subtitles
+    scene.font = draft.font or scene.font
+    if draft.voice_mode == 'none':
+        from .sounddesign import background_only
+        return background_only(SceneSpec.model_validate(scene.model_dump()))
+    scene.audio_mode = 'full'
+    scene.use_timed_voice = draft.voice_mode == 'auto'
     scene.voice_audio = draft.voice_file if draft.voice_mode == "upload" else None
-    scene.audio, scene.music, scene.music_volume = None, draft.music, draft.music_volume
     scene.voice_volume, scene.duck_music = draft.voice_volume, draft.duck_music
-    scene.subtitles, scene.font = draft.subtitles, draft.font or scene.font
-    return background_only(SceneSpec.model_validate(scene.model_dump()), draft.music, draft.music_volume)
+    if not scene.use_timed_voice:
+        for shot in scene.shots:
+            for cue in shot.narration:
+                cue.audio = None
+    return SceneSpec.model_validate(scene.model_dump())
 
 
 def render_project(pid, mode):
@@ -242,6 +261,8 @@ def render_project(pid, mode):
         project = read_project(pid)
         ensure_idle(project)
         draft = Draft.model_validate(project["draft"])
+        if mode == 'video':
+            validate_voice_input(draft)
         if draft.prompt.strip() and (not draft.scene or draft.source_signature != signature(draft)):
             return start_plan(pid, auto_render=True, render_mode=mode)
         scene = scene_for_render(draft)
@@ -252,11 +273,9 @@ def render_project(pid, mode):
             if not draft.prompt.strip() or not draft.scene.shots:
                 raise
             return start_plan(pid, auto_render=True, render_mode=mode)
-        timed_voice = scene.audio_mode != 'music_only' and any(shot.narration for shot in scene.shots)
+        timed_voice = scene.audio_mode == 'full' and scene.use_timed_voice and any(shot.narration for shot in scene.shots)
         sound_design = scene.effects or scene.music_cues or scene.music_style != 'none'
         if mode == "video" and (timed_voice or sound_design or draft.voice_mode == "tts"):
-            if not timed_voice and not sound_design and not draft.narration.strip():
-                raise ValueError("Nhập lời thuyết minh để tạo voice AI")
             save_project(pid, state="preparing_audio", error=None)
             POOL.submit(prepare_and_render, pid, draft, scene, root, mode)
         else:
@@ -271,16 +290,14 @@ def prepare_and_render(pid, draft, scene, root, mode):
     try:
         from .sounddesign import prepare_sound
         prepare_sound(scene, root)
-        if scene.audio_mode == 'music_only':
-            pass
-        elif scene.shots:
-            asyncio.run(synthesize_cues(scene, root))
-        elif draft.voice_mode == 'tts':
+        if scene.audio_mode == 'full' and draft.voice_mode == 'tts':
             folder = root / "voices"
             folder.mkdir(exist_ok=True)
             path = folder / f"tts-{uuid.uuid4().hex}.mp3"
             asyncio.run(synthesize(draft.narration, draft.voice_id, draft.rate, path, word_timing=bool(scene.subtitles)))
             scene.voice_audio = path.relative_to(root).as_posix()
+        elif scene.audio_mode == 'full' and scene.use_timed_voice and any(shot.narration for shot in scene.shots):
+            asyncio.run(synthesize_cues(scene, root))
         job = submit(scene, mode, root)
         latest = read_project(pid)
         save_project(pid, current_job=job["id"], jobs=latest["jobs"]+[job["id"]], state="ready", error=None)

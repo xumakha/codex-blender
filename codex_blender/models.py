@@ -383,6 +383,7 @@ class SceneSpec(Model):
     captions: bool = False
     audio: str | None = None
     audio_mode: Literal['full','music_only'] = 'full'
+    use_timed_voice: bool = True
     font: str | None = None
     voice_audio: str | None = None
     music: str | None = None

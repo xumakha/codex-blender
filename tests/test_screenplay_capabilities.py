@@ -54,6 +54,31 @@ class ScreenplayCapabilitiesTests(unittest.TestCase):
         result=studio.scene_for_render(studio.Draft(scene=scene,duration=4))
         self.assertEqual(result.rigs[0].bones[0].keyframes[0].time,2)
 
+    def test_compiled_scene_uses_one_voice_source_and_keeps_caption_text(self):
+        scene = SceneSpec(duration=2, shots=[{
+            'title': 'A', 'start': 0, 'end': 2, 'setting': 'Room', 'actions': [],
+            'objects': geometry(), 'narration': [{'text': 'First line', 'start': 0, 'end': 1}],
+        }])
+        for mode in ('auto', 'upload', 'tts', 'none'):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmp:
+                draft = studio.Draft(scene=scene, voice_mode=mode, voice_file='recording.wav', narration='Manual text')
+                prepared = studio.scene_for_render(draft)
+                self.assertEqual(prepared.shots[0].narration[0].text, 'First line')
+                with patch.object(audio, 'synthesize', new_callable=AsyncMock) as manual, \
+                     patch.object(audio, 'synthesize_cues', new_callable=AsyncMock) as timed, \
+                     patch.object(studio, 'submit', return_value={'id': 'job'}) as submit, \
+                     patch.object(studio, 'read_project', return_value={'jobs': []}), \
+                     patch.object(studio, 'save_project'):
+                    studio.prepare_and_render('project', draft, prepared, Path(tmp), 'video')
+                    submit.assert_called_once()
+                self.assertEqual(timed.await_count, int(mode == 'auto'))
+                self.assertEqual(manual.await_count, int(mode == 'tts'))
+                if mode == 'tts':
+                    self.assertEqual(manual.await_args.args[0], 'Manual text')
+                    self.assertTrue(prepared.voice_audio.startswith('voices/tts-'))
+                else:
+                    self.assertEqual(prepared.voice_audio, 'recording.wav' if mode == 'upload' else None)
+
     def test_warning_does_not_disable_hard_unsupported_checks(self):
         raw={'title':'Warning','duration':2,'style':'3D', 'warnings':['Speech will be measured at the audio stage'],
              'shots':[{'title':'A','start':0,'end':2,'setting':'Room','actions':['Wave hand']}]}

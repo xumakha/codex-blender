@@ -107,7 +107,8 @@ function populateAssetSelects(){
   setSelect('existing-reference',S.assets.filter(a=>a.kind==='image'&&!a.internal),'Chọn ảnh trong thư viện…');
 }
 function updateAudio(){
-  $('duck-music').checked=false;$('duck-music').closest('label').hidden=true;
+  $('duck-music').closest('label').hidden=S.voiceMode==='none';
+  $('voice-volume').closest('.range-field').hidden=S.voiceMode==='none';
   $('voice-upload').hidden=S.voiceMode!=='upload';$('voice-tts').hidden=S.voiceMode!=='tts';
   $('voice-options').hidden=!['auto','tts'].includes(S.voiceMode);
   const voice=S.voices.find(v=>v.id===$('voice-id').value);

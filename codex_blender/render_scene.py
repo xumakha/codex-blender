@@ -12,7 +12,7 @@ from geometry import expand_objects, descendants
 from mesh_program import build_mesh, validate_mesh
 from pause_control import checkpoint
 from render_artifacts import complete_png, complete_blend
-from render_timing import record_frame
+from render_timing import record_frame, shot_review_frames
 from rigging import build_rigs
 
 import bpy
@@ -373,11 +373,7 @@ def review_shot(spec, assets, output):
             child for obj in group for child in obj.children_recursive} if obj.type in {'MESH', 'CURVE', 'FONT'}]
     visible_times = {identifier: [] for identifier in groups}
     images = []
-    frames = {1, (count + 1) // 2, count}
-    visibility_frames = frames | {
-        min(count, 1 + round(time * spec['fps']))
-        for binding in shot['bindings'] for time in (binding['start'], binding['end'])
-    }
+    frames, visibility_frames = shot_review_frames(count, spec['fps'], shot['bindings'])
     for frame in sorted(visibility_frames):
         scene.frame_set(frame)
         depsgraph = bpy.context.evaluated_depsgraph_get()

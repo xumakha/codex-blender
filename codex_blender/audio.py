@@ -259,9 +259,10 @@ def encode_video(path, spec, root):
     cmd = [imageio_ffmpeg.get_ffmpeg_exe(), "-y", "-framerate", str(spec["fps"]), "-start_number", "1", "-i", str(path / "frames" / "frame_%04d.png")]
     cues = [cue for shot in spec.get('shots', []) for cue in shot.get('narration', [])]
     music_only = spec.get('audio_mode') == 'music_only'
-    if not music_only and any(not cue.get('audio') for cue in cues):
+    timed_voice = not music_only and spec.get('use_timed_voice', True)
+    if timed_voice and any(not cue.get('audio') for cue in cues):
         raise ValueError("Lời thoại trong timeline chưa được tạo thành âm thanh")
-    voice = not music_only and bool(spec.get("voice_audio") or cues)
+    voice = not music_only and bool(spec.get("voice_audio") or (timed_voice and cues))
     music = spec.get("music") or spec.get("audio")
     music_cues = [] if music_only else spec.get('music_cues', [])
     if any(not cue.get('audio') for cue in music_cues):
@@ -273,7 +274,8 @@ def encode_video(path, spec, root):
     voices = []
     if not music_only and spec.get('voice_audio'):
         voices.append((spec['voice_audio'], 0, duration))
-    if not music_only:voices += [(cue['audio'], cue['start'], cue['end']-cue['start']) for cue in cues]
+    if timed_voice:
+        voices += [(cue['audio'], cue['start'], cue['end']-cue['start']) for cue in cues]
     for path_name, _, _ in voices:
         cmd += ['-i', str(asset_path(path_name, root))]
     effects = [] if music_only else spec.get('effects', [])
@@ -328,7 +330,7 @@ def encode_video(path, spec, root):
         shutil.copyfile(asset_path(spec["font"], root), subtitle_font)
         from .captions import load_words, word_events, write_ass, font_family
         captions = [(spec['subtitles'], 0, duration, spec.get('voice_audio'))] if spec.get('subtitles') else [
-            (cue['text'], cue['start'], cue['end'], cue.get('audio')) for cue in cues]
+            (cue['text'], cue['start'], cue['end'], cue.get('audio') if timed_voice else None) for cue in cues]
         events, estimated = [], False
         for text, start, end, audio in captions:
             words = load_words(asset_path(audio, root)) if audio and not music_only else []

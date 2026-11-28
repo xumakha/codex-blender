@@ -6,6 +6,21 @@ from unittest.mock import patch
 from codex_blender import jobs, render_timing
 
 
+class ShotReviewFrameTests(unittest.TestCase):
+    def test_short_reveal_between_baseline_stills_gets_real_preview_frames(self):
+        stills, bounds_frames = render_timing.shot_review_frames(100, 10, [{'start': 2, 'end': 3}])
+        self.assertEqual(stills, {1, 26, 31, 50, 100})
+        self.assertEqual(bounds_frames, stills | {21})
+
+    def test_repeated_beats_and_shot_end_respect_frame_range_and_still_budget(self):
+        bindings = [{'start': i, 'end': i + 1} for i in range(10)] * 2
+        stills, bounds_frames = render_timing.shot_review_frames(100, 10, bindings)
+        self.assertEqual(len(stills), 5)
+        self.assertTrue(stills <= bounds_frames)
+        self.assertTrue(all(1 <= frame <= 100 for frame in bounds_frames))
+        self.assertEqual(render_timing.shot_review_frames(1, 10, []), ({1}, {1}))
+
+
 class RenderTimingTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

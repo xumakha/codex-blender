@@ -136,7 +136,7 @@ class AutonomousVideoTests(unittest.TestCase):
         self.assertTrue(draft['auto_repair'])
         self.assertEqual(draft['max_repair_attempts'], 3)
 
-    def test_render_error_and_visual_rejection_resume_only_failed_shot(self):
+    def test_render_error_and_empty_camera_resume_only_failed_shot(self):
         designs = Counter()
         blocked = True
         seen_feedback = []
@@ -147,7 +147,7 @@ class AutonomousVideoTests(unittest.TestCase):
                 validate(result)
                 return result
             if stage.endswith('-review'):
-                issues = ['The ring is obscured'] if stage == 'shot-03-review' and designs['shot-03'] == 2 else []
+                issues = ['The grip is partly hidden'] if stage == 'shot-03-review' else []
                 return director.PreviewReview(issues=issues, warnings=[])
             designs[stage] += 1
             if stage == 'shot-03':
@@ -157,6 +157,8 @@ class AutonomousVideoTests(unittest.TestCase):
         def render(folder, assets, plan, shot, design, samples):
             if shot.title == 'Ring 3' and designs['shot-03'] == 1:
                 raise ValueError('Blender rejected degenerate mesh')
+            if shot.title == 'Ring 3' and designs['shot-03'] == 2:
+                return {'visible_times': {'ring': []}, 'images': []}, []
             if shot.title == 'Ring 3' and blocked and designs['shot-03'] == 3:
                 raise director.BlenderUnavailable('Disk full')
             return {'visible_times': {'ring': [0]}, 'images': []}, []
@@ -166,7 +168,7 @@ class AutonomousVideoTests(unittest.TestCase):
         self.assertEqual(failed['generation']['severity'], 'critical')
         self.assertEqual(designs, {'shot-01': 1, 'shot-02': 1, 'shot-03': 3})
         self.assertIn('degenerate mesh', seen_feedback[1])
-        self.assertIn('obscured', seen_feedback[2])
+        self.assertIn('Camera không thấy vật thể nào', seen_feedback[2])
         blocked = False
         with patch.object(director, 'call_planner', side_effect=planner), \
              patch.object(director, 'render_shot_review', side_effect=render), \
@@ -178,6 +180,7 @@ class AutonomousVideoTests(unittest.TestCase):
         self.assertEqual(resumed['state'], 'ready', resumed.get('error'))
         self.assertEqual(designs, {'shot-01': 1, 'shot-02': 1, 'shot-03': 4})
         self.assertEqual(len(resumed['draft']['scene']['shots']), 3)
+        self.assertIn('The grip is partly hidden', resumed['generation_warnings'])
 
     def test_mesh_program_is_bounded_and_has_no_file_or_module_access(self):
         vertices, faces = build_mesh(MESH)

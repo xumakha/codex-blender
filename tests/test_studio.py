@@ -219,8 +219,10 @@ class StudioTests(unittest.TestCase):
         draft=studio.Draft(scene=scene,duration=10,voice_mode='upload',voice_file='voice.wav',music='music.wav',voice_volume=.8,music_volume=.15)
         result=studio.scene_for_render(draft)
         self.assertEqual(result.objects[0].keyframes[0].time,10)
-        self.assertIsNone(result.voice_audio)
-        self.assertEqual(result.audio_mode,'music_only')
+        self.assertEqual(result.voice_audio,'voice.wav')
+        self.assertEqual(result.audio_mode,'full')
+        self.assertFalse(result.use_timed_voice)
+        self.assertEqual(result.voice_volume,.8)
         self.assertEqual(result.music,'music.wav')
         self.assertEqual(result.music_volume,.15)
 
